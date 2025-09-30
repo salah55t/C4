@@ -1365,7 +1365,18 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             )
         except BinanceAPIException as e:
             logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
-            send_enhanced_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\n`{e}`", force=True)
+            send_enhanced_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\
+    # --- TTM Squeeze dynamic filter (مُضاف تلقائياً) ---
+    try:
+        rej = _apply_ttm_check_in_momentum_strategy(df, symbol_name)
+        if rej:
+            ttm_check = check_ttm_squeeze_dynamic_filters(df)
+            log_rejection(symbol_name, rej, {"squeeze_on": ttm_check.get('squeeze_on'), "momentum": f"{ttm_check.get('momentum'):.6f}"})
+            return False
+    except Exception as _e:
+        logger.error(f"[TTM Integrate] error applying TTM Squeeze for {symbol_name}: {_e}")
+    # --- end TTM Squeeze ---
+n`{e}`", force=True)
         except Exception as e:
             logger.error(f"❌ [Real Trade] CRITICAL ERROR creating real trade for {symbol}: {e}", exc_info=True)
     else: # Paper Trading
@@ -2954,3 +2965,173 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+\n\n
+# ======= بداية التعديل: TTM Squeeze (مُلصق آلياً) =======
+# (تم إلحاق هذا المقطع آلياً — إذا رغبت حذف المقطع أو تغييره فستجده بين التعليقات أعلاه وأسفله)
+USE_TTM_SQUEEZE_FILTER: bool = True
+try:
+    REJECTION_REASONS_AR.update({
+        "DYN_TTM_SQUEEZE": "ديناميكي: مؤشر TTM Squeeze يمنع الدخول (لم يتم إطلاق الانفراج بعد)"
+    })
+except Exception:
+    pass
+
+import math
+
+def calculate_ttm_squeeze(df: pd.DataFrame, bb_len: int = 20, bb_std_mult: float = 2.0, kc_ema_len: int = 20, kc_atr_mult: float = 1.5) -> Dict:
+    try:
+        df_loc = df.copy()
+        if 'bb_upper' not in df_loc.columns or 'bb_lower' not in df_loc.columns:
+            middle = df_loc['close'].rolling(window=bb_len).mean()
+            std = df_loc['close'].rolling(window=bb_len).std()
+            df_loc['bb_middle'] = middle
+            df_loc['bb_upper'] = middle + (std * bb_std_mult)
+            df_loc['bb_lower'] = middle - (std * bb_std_mult)
+            df_loc['bb_width'] = (df_loc['bb_upper'] - df_loc['bb_lower']) / df_loc['bb_middle'].replace(0, 1e-9)
+        else:
+            df_loc['bb_width'] = df_loc.get('bb_width', (df_loc['bb_upper'] - df_loc['bb_lower']) / df_loc['bb_middle'].replace(0, 1e-9))
+
+        ema_kc = df_loc['close'].ewm(span=kc_ema_len, adjust=False).mean()
+        high_low = df_loc['high'] - df_loc['low']
+        high_close = (df_loc['high'] - df_loc['close'].shift()).abs()
+        low_close = (df_loc['low'] - df_loc['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
+        atr_kc = tr.ewm(span=kc_ema_len, adjust=False).mean()
+        kc_upper = ema_kc + (atr_kc * kc_atr_mult)
+        kc_lower = ema_kc - (atr_kc * kc_atr_mult)
+        kc_width = (kc_upper - kc_lower) / ema_kc.replace(0, 1e-9)
+
+        squeeze_on = (df_loc['bb_upper'] <= kc_upper) & (df_loc['bb_lower'] >= kc_lower)
+        squeeze_off = ~squeeze_on
+
+        if 'macd_hist' in df_loc.columns:
+            momentum = df_loc['macd_hist'].ewm(span=9, adjust=False).mean()
+        else:
+            momentum = df_loc['close'].diff().ewm(span=9, adjust=False).mean()
+
+        last_idx = df_loc.index[-1]
+        res = {
+            'squeeze_on': bool(bool(squeeze_on.iloc[-1])),
+            'squeeze_off': bool(bool(squeeze_off.iloc[-1])),
+            'bb_upper': float(df_loc['bb_upper'].iloc[-1]),
+            'bb_lower': float(df_loc['bb_lower'].iloc[-1]),
+            'kc_upper': float(kc_upper.iloc[-1]),
+            'kc_lower': float(kc_lower.iloc[-1]),
+            'bb_width': float(df_loc['bb_width'].iloc[-1]) if 'bb_width' in df_loc.columns else float((df_loc['bb_upper'].iloc[-1] - df_loc['bb_lower'].iloc[-1]) / max(df_loc['close'].iloc[-1], 1e-9)),
+            'kc_width': float(kc_width.iloc[-1]),
+            'momentum': float(momentum.iloc[-1]) if not math.isnan(momentum.iloc[-1]) else 0.0,
+            'squeeze_release_bull': bool(squeeze_off.iloc[-1] and momentum.iloc[-1] > 0),
+            'squeeze_release_bear': bool(squeeze_off.iloc[-1] and momentum.iloc[-1] < 0),
+        }
+        return res
+
+    except Exception as e:
+        logger.error(f\"❌ [TTM Squeeze] Error computing squeeze: {e}\")
+        return {'squeeze_on': False, 'squeeze_off': True, 'squeeze_release_bull': True, 'squeeze_release_bear': True, 'momentum': 0.0}
+
+def check_ttm_squeeze_dynamic_filters(df: pd.DataFrame) -> Dict:
+    try:
+        return calculate_ttm_squeeze(df)
+    except Exception as e:
+        logger.error(f\"❌ [TTM Squeeze Check] Unexpected error: {e}\")
+        return {'squeeze_on': False, 'squeeze_off': True, 'squeeze_release_bull': True, 'squeeze_release_bear': True, 'momentum': 0.0}
+
+def _apply_ttm_check_in_momentum_strategy(df: pd.DataFrame, symbol_name: str) -> Optional[str]:
+    if not USE_TTM_SQUEEZE_FILTER:
+        return None
+    try:
+        ttm = check_ttm_squeeze_dynamic_filters(df)
+        if not (ttm.get('squeeze_release_bull') or ttm.get('squeeze_release_bear')):
+            return 'DYN_TTM_SQUEEZE'
+        return None
+    except Exception as e:
+        logger.error(f\"❌ [TTM Apply] Unexpected error for {symbol_name}: {e}\")
+        return None
+
+# ======= نهاية التعديل: TTM Squeeze =======
+
+    # --- ADX Trend Strength Filter (مضاف تلقائياً) ---
+    try:
+        last_adx = float(df.iloc[-1].get('adx', 0))
+        if last_adx < 25:
+            #弱趋势 => رفض
+            return {**locals().get('result', {}), 'trend_ok': False} if 'result' in locals() else {'trend_ok': False}
+    except Exception:
+        pass
+    # --- end ADX ---
+
+    # --- VWAP Pullback Filter (مضاف تلقائياً) ---
+    try:
+        # compute intraday VWAP if not present (approx using typical price * volume cumulative if volume exists)
+        if 'vwap' not in df.columns:
+            if 'volume' in df.columns and df['volume'].notnull().any():
+                tp = (df['high'] + df['low'] + df['close'])/3
+                cum_pv = (tp * df['volume']).cumsum()
+                cum_v = df['volume'].cumsum().replace(0, 1e-9)
+                df['vwap'] = cum_pv / cum_v
+        last_vwap = float(df.iloc[-1].get('vwap', df.iloc[-1]['close']))
+        last_close = float(df.iloc[-1]['close'])
+        # require price to be within 1.5% above VWAP for long pullback (adjustable)
+        if not (last_close >= last_vwap and (last_close - last_vwap)/max(last_vwap,1e-9) <= 0.015):
+            return {**locals().get('result', {}), 'vwap_ok': False} if 'result' in locals() else {'vwap_ok': False}
+    except Exception:
+        pass
+    # --- end VWAP ---
+
+    # --- Bollinger + Stochastic Filter (مضاف تلقائياً) ---
+    try:
+        last_close = float(df.iloc[-1]['close'])
+        # ensure BB computed
+        if 'bb_lower' not in df.columns:
+            m = df['close'].rolling(window=20).mean()
+            s = df['close'].rolling(window=20).std()
+            df['bb_lower'] = m - 2*s
+            df['bb_upper'] = m + 2*s
+        last_bb_lower = float(df.iloc[-1].get('bb_lower', last_close))
+        # ensure stochastic %K
+        if 'stoch_k' not in df.columns:
+            low_min = df['low'].rolling(14).min()
+            high_max = df['high'].rolling(14).max()
+            df['stoch_k'] = 100 * (df['close'] - low_min) / (high_max - low_min).replace(0,1e-9)
+        last_stoch_k = float(df.iloc[-1].get('stoch_k', 50))
+        # require stochastic to be oversold and price near lower BB
+        if not (last_stoch_k <= 20 and (last_close - last_bb_lower)/max(last_bb_lower,1e-9) <= 0.02):
+            return {**locals().get('result', {}), 'bb_stoch_ok': False} if 'result' in locals() else {'bb_stoch_ok': False}
+    except Exception:
+        pass
+    # --- end BB+Stoch ---
+
+    # --- RSI Divergence Filter (مضاف تلقائياً) ---
+    try:
+        # Simple bullish divergence detection for Longs:
+        # find last two swing lows in price and corresponding RSI lows
+        if 'rsi' not in df.columns:
+            # compute RSI 14
+            delta = df['close'].diff()
+            up = delta.clip(lower=0)
+            down = -1*delta.clip(upper=0)
+            ma_up = up.ewm(span=14, adjust=False).mean()
+            ma_down = down.ewm(span=14, adjust=False).mean()
+            rs = ma_up / ma_down.replace(0,1e-9)
+            df['rsi'] = 100 - (100 / (1 + rs))
+        # simple swing low detection: local minima over 5 candles
+        lows = df['low']
+        cand = len(df)
+        if cand >= 6:
+            recent = df.iloc[-8:]
+            # find indices of two lowest lows in recent window
+            lows_idx = recent['low'].nsmallest(2).index
+            if len(lows_idx) >= 2:
+                idx1, idx2 = lows_idx[0], lows_idx[1]
+                # ensure older idx < newer idx
+                if idx1 < idx2:
+                    price_low1 = float(df.loc[idx1,'low'])
+                    price_low2 = float(df.loc[idx2,'low'])
+                    rsi_low1 = float(df.loc[idx1,'rsi'])
+                    rsi_low2 = float(df.loc[idx2,'rsi'])
+                    # bullish divergence: price makes lower low but RSI makes higher low
+                    if not (price_low2 < price_low1 and rsi_low2 > rsi_low1):
+                        return {**locals().get('result', {}), 'rsi_div_ok': False} if 'result' in locals() else {'rsi_div_ok': False}
+    except Exception:
+        pass
+    # --- end RSI divergence ---
