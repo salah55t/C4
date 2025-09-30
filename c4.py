@@ -1365,7 +1365,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             )
         except BinanceAPIException as e:
             logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
-            send_enhanced_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\
+            send_enhanced_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*: {e}")
     # --- TTM Squeeze dynamic filter (مُضاف تلقائياً) ---
     try:
         rej = _apply_ttm_check_in_momentum_strategy(df, symbol_name)
