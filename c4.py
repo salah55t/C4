@@ -118,7 +118,7 @@ STRATEGY_NAMES = {
 strategy_filters_lock = Lock()
 
 # --- إعدادات عامة (معدلة لإطار 5 دقائق) ---
-SIGNAL_GENERATION_TIMEFRAME: str = '5m'
+SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '15m'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['5m', '15m', '1h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7 # تقليل مدة البيانات التاريخية لتسريع الحسابات
