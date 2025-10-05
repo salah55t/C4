@@ -770,30 +770,60 @@ def save_settings_to_redis():
         return False
 
 # --- الفلاتر الديناميكية ونظام السوق ---
+
+# ===== FIXED: Elliott Wave Fibonacci Retracement =====
 def get_wave_retracement(df: pd.DataFrame) -> float:
+    """
+    حساب نسبة تصحيح فيبوناتشي للموجة الأخيرة.
+    يرجع قيمة بين 0 و 1، أو -1.0 في حالة الفشل (وليس 999.0).
+    """
     try:
         highs = df['high'].values
         lows = df['low'].values
+        
+        # البحث عن القمم والقيعان المحلية
         peaks_idx = argrelextrema(highs, np.greater, order=5)[0]
         troughs_idx = argrelextrema(lows, np.less, order=5)[0]
         
-        if len(peaks_idx) < 1 or len(troughs_idx) < 2: return 999.0
+        # نحتاج على الأقل قمة واحدة وقاعين
+        if len(peaks_idx) < 1 or len(troughs_idx) < 2:
+            return -1.0  # فشل: بيانات غير كافية
         
+        # القاع الأخير (بداية التصحيح)
         last_trough_idx = troughs_idx[-1]
-        prev_peak_idx = peaks_idx[peaks_idx < last_trough_idx][-1]
-        prev_trough_idx = troughs_idx[troughs_idx < prev_peak_idx][-1]
+        
+        # القمة السابقة له
+        prev_peak_idx = peaks_idx[peaks_idx < last_trough_idx]
+        if len(prev_peak_idx) == 0:
+            return -1.0  # لا توجد قمة قبل القاع الأخير
+        prev_peak_idx = prev_peak_idx[-1]
+        
+        # القاع السابق للقمة (بداية الموجة)
+        prev_trough_idx = troughs_idx[troughs_idx < prev_peak_idx]
+        if len(prev_trough_idx) == 0:
+            return -1.0  # لا يوجد قاع قبل القمة
+        prev_trough_idx = prev_trough_idx[-1]
 
+        # حساب نسبة التصحيح
         wave_start_price = lows[prev_trough_idx]
         wave_end_price = highs[prev_peak_idx]
         retracement_price = lows[last_trough_idx]
 
         wave_height = wave_end_price - wave_start_price
-        if wave_height <= 0: return 999.0
+        if wave_height <= 0:
+            return -1.0  # ارتفاع الموجة غير صحيح
         
+        # نسبة فيبوناتشي = (القمة - القاع الأخير) / ارتفاع الموجة
         retracement = (wave_end_price - retracement_price) / wave_height
-        return retracement
-    except Exception:
-        return 999.0
+        
+        # التأكد من أن القيمة منطقية (بين 0 و 1.5)
+        if 0 <= retracement <= 1.5:
+            return retracement
+        else:
+            return -1.0  # قيمة غير منطقية
+            
+    except Exception as e:
+        return -1.0  # خطأ في الحساب
 
 def check_bb_stoch_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
@@ -894,24 +924,45 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
         'adx_ok': last_row['adx'] > dynamic_adx_threshold,
     }
 
+# ===== FIXED: Elliott Wave Dynamic Filters =====
 def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
+    """
+    فلاتر ديناميكية محسنة لاستراتيجية موجات إليوت.
+    
+    التحسينات:
+    1. معالجة صحيحة لحالات فشل حساب فيبوناتشي
+    2. نطاق فيبوناتشي أكثر واقعية (0.382 - 0.786)
+    3. التحقق من قوة الارتداد بعد التصحيح
+    """
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    # --- إصلاح رئيسي: تم توسيع نطاق قبول فيبوناتشي بشكل كبير لزيادة فرص الدخول ---
-    # كان النطاق السابق ضيقًا جدًا ويسبب معظم حالات الرفض.
-    fib_min, fib_max = 0.15, 0.95 # نطاق واسع ومرن جداً
+    # حساب تصحيح فيبوناتشي
+    fib_retracement = get_wave_retracement(df)
     
+    # نطاق فيبوناتشي الكلاسيكي للموجات (أكثر واقعية)
+    # 0.382, 0.5, 0.618 هي المستويات الأكثر شيوعاً
+    fib_min, fib_max = 0.30, 0.80
+    fibonacci_valid = (fib_min <= fib_retracement <= fib_max) if fib_retracement >= 0 else False
+    
+    # التحقق من قوة الارتداد: السعر يجب أن يكون فوق EMA21
+    price_above_ema21 = last_row['close'] > last_row.get('ema21', 0)
+    
+    # الحجم يجب أن يكون أعلى من المتوسط بنسبة تتناسب مع التقلب
     volume_ma = df['volume'].rolling(20).mean()
     wave_volume_multiplier = 1.3 + (atr_percent / 50)
+    volume_ok = last_row['volume'] > volume_ma.iloc[-1] * wave_volume_multiplier
     
+    # زخم MACD يجب أن يكون إيجابياً ومتزايداً
     macd_momentum = df['macd_hist'].rolling(5).mean()
-    momentum_threshold = macd_momentum.rolling(20).std() * 0.3
+    momentum_threshold = macd_momentum.rolling(20).std().iloc[-1] * 0.3
+    momentum_ok = macd_momentum.iloc[-1] > momentum_threshold
     
     return {
-        'fibonacci_ok': fib_min <= get_wave_retracement(df) <= fib_max,
-        'volume_ok': last_row['volume'] > volume_ma.iloc[-1] * wave_volume_multiplier,
-        'momentum_ok': macd_momentum.iloc[-1] > momentum_threshold.iloc[-1],
+        'fibonacci_ok': fibonacci_valid and price_above_ema21,
+        'volume_ok': volume_ok,
+        'momentum_ok': momentum_ok,
+        'fib_value': fib_retracement  # للتشخيص
     }
 
 def check_range_reversal_dynamic_filters(df: pd.DataFrame) -> Dict:
@@ -1051,24 +1102,70 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
         
     return True
 
+# ===== FIXED: BB_Stoch Strategy =====
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية بولينجر + ستوكاستيك المحسنة.
+    
+    الشروط:
+    1. السعر فوق EMA50 (اتجاه صاعد)
+    2. السعر لمس أو اقترب من الحد السفلي لبولينجر
+    3. Stochastic في منطقة التشبع البيعي وبدأ في الارتفاع
+    4. عرض البولينجر كافٍ (تقلب معقول)
+    5. حجم التداول مناسب
+    6. RSI ليس في منطقة التشبع الشرائي المفرط
+    """
     symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50: return False
+    
+    if len(df) < 50:
+        return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    if not (last['close'] > last['ema50'] and (df['low'].tail(3) <= df['bb_lower'].tail(3)).any() and last['close'] > last['bb_lower']):
+    # 1. الاتجاه العام صاعد
+    if not (last['close'] > last['ema50']):
         return False
     
-    if not ((prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k'])): return False
-
-    filters = check_bb_stoch_dynamic_filters(df)
-    if not filters['bb_width_ok']: log_rejection(symbol_name, "DYN_BB_WIDTH_LOW"); return False
-    if not filters['stoch_ok']: log_rejection(symbol_name, "DYN_STOCH_LOW"); return False
-    if not filters['volume_ok']: log_rejection(symbol_name, "DYN_VOLUME_LOW"); return False
-
+    # 2. لمس الحد السفلي لبولينجر
+    bb_touch = (df['low'].tail(3) <= df['bb_lower'].tail(3) * 1.003).any()
+    
+    if not bb_touch:
+        return False
+    
+    # 3. السعر الحالي فوق الحد السفلي (بدأ في الارتداد)
+    if last['close'] <= last['bb_lower']:
+        return False
+    
+    # 4. Stochastic: كان منخفضاً وبدأ في الارتفاع
+    stoch_was_low = prev['stoch_k'] < 30
+    stoch_rising = last['stoch_k'] > prev['stoch_k']
+    stoch_not_overbought = last['stoch_k'] < 70
+    
+    if not (stoch_was_low and stoch_rising and stoch_not_overbought):
+        return False
+    
+    # 5. عرض البولينجر كافٍ (التقلب مناسب للدخول)
+    bb_width = last.get('bb_width', 0)
+    bb_width_ma = df['bb_width'].rolling(20).mean().iloc[-1]
+    
+    if bb_width < bb_width_ma * 0.8:
+        return False
+    
+    # 6. الحجم مناسب
+    atr_percent = last.get('atr_percent', 0)
+    volume_ma = df['volume'].rolling(20).mean().iloc[-1]
+    volume_multiplier = 1.0 + (atr_percent / 100)
+    
+    if last['volume'] < volume_ma * volume_multiplier:
+        return False
+    
+    # 7. RSI ليس مرتفعاً جداً (لتجنب الدخول في قمة)
+    if last.get('rsi', 50) > 70:
+        return False
+    
     return True
+
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
@@ -1094,18 +1191,68 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
         
     return True
 
+# ===== FIXED: Pullback Strategy =====
 def check_pullback_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الارتداد المحسنة.
+    
+    الشروط:
+    1. اتجاه صاعد واضح (EMA21 > EMA50 > EMA200)
+    2. حدث تصحيح (pullback) لمس أو اخترق EMA21
+    3. التصحيح عميق بما يكفي (على الأقل 1.5% من القمة الأخيرة)
+    4. السعر بدأ في التعافي (إغلاق فوق EMA21 أو EMA9)
+    5. حجم التداول يزداد عند التعافي
+    """
     symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200: return False
+    
+    if len(df) < 200:
+        return False
 
     last = df.iloc[-1]
-    if not (last['ema21'] > last['ema50'] > last['ema200'] and (df['low'].tail(3) <= df['ema21'].tail(3)).any()):
+    
+    # 1. التحقق من الاتجاه الصاعد
+    if not (last['ema21'] > last['ema50'] > last['ema200']):
         return False
     
-    filters = check_pullback_dynamic_filters(df, mtf_trend)
-    if not filters['recovery_ok']: log_rejection(symbol_name, "DYN_RECOVERY_FAIL"); return False
-    if not filters['volume_ok']: log_rejection(symbol_name, "DYN_VOLUME_LOW"); return False
-        
+    # 2. التحقق من حدوث تصحيح (لمس EMA21 في آخر 3-5 شمعات)
+    recent_lows = df['low'].tail(5)
+    recent_ema21 = df['ema21'].tail(5)
+    
+    pullback_occurred = (recent_lows <= recent_ema21 * 1.002).any()  # هامش 0.2%
+    
+    if not pullback_occurred:
+        return False
+    
+    # 3. التحقق من عمق التصحيح
+    # نحسب القمة الأخيرة في آخر 10 شمعات
+    recent_high = df['high'].tail(10).max()
+    pullback_depth = (recent_high - recent_lows.min()) / recent_high
+    
+    atr_percent = last.get('atr_percent', 0)
+    min_pullback_depth = 0.015 if atr_percent > 2.0 else 0.010  # 1-1.5%
+    
+    if pullback_depth < min_pullback_depth:
+        return False
+    
+    # 4. التحقق من التعافي
+    # السعر يجب أن يكون فوق EMA9 أو يغلق فوق أدنى سعر في التصحيح
+    recovery_price = recent_lows.min() * 1.003  # 0.3% فوق أدنى سعر
+    price_recovering = last['close'] > recovery_price or last['close'] > last['ema9']
+    
+    if not price_recovering:
+        return False
+    
+    # 5. التحقق من الحجم
+    volume_ma = df['volume'].rolling(20).mean()
+    recovery_volume_multiplier = 1.1 + (atr_percent / 100)
+    
+    if last['volume'] <= volume_ma.iloc[-1] * recovery_volume_multiplier:
+        return False
+    
+    # 6. التأكد من أن MTF يدعم الاتجاه الصاعد
+    if mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish':
+        return False
+    
     return True
 
 def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
@@ -1146,22 +1293,68 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> b
         
     return True
 
+# ===== FIXED: Range Reversal Strategy =====
 def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الانعكاس النطاقي المحسنة.
+    
+    الشروط:
+    1. ADX < 23 (سوق جانبي)
+    2. السعر لمس أو اخترق الحد السفلي لبولينجر
+    3. حدث ارتداد قوي (إغلاق فوق BB السفلي بنسبة معينة)
+    4. RSI في منطقة التشبع البيعي (< 35)
+    5. زيادة في الحجم عند الارتداد
+    """
     symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50: return False
+    
+    if len(df) < 50:
+        return False
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
-
-    price_crossed_down = prev['low'] <= prev['bb_lower']
-    price_rebounded_up = last['close'] > last['bb_lower']
-
-    if not (price_crossed_down and price_rebounded_up):
+    
+    # 1. التحقق من أن السوق جانبي (ADX منخفض)
+    if last.get('adx', 99) >= 23:
         return False
     
-    filters = check_range_reversal_dynamic_filters(df)
-    if not filters['adx_ok']: log_rejection(symbol_name, "Range Reversal: Trend too strong (ADX > 30)"); return False
-    if not filters['rsi_ok']: log_rejection(symbol_name, "Range Reversal: RSI not in oversold zone"); return False
+    # 2. التحقق من لمس الحد السفلي
+    bb_lower = last.get('bb_lower', 0)
+    if bb_lower == 0:
+        return False
+    
+    # السعر لمس أو اخترق الحد السفلي في الشمعة السابقة
+    price_touched_lower = prev['low'] <= prev.get('bb_lower', float('inf'))
+    
+    if not price_touched_lower:
+        return False
+    
+    # 3. التحقق من قوة الارتداد
+    # الإغلاق الحالي يجب أن يكون فوق BB السفلي بنسبة معينة
+    rebound_threshold = bb_lower * 1.002  # 0.2% فوق الحد السفلي
+    strong_rebound = last['close'] > rebound_threshold
+    
+    if not strong_rebound:
+        return False
+    
+    # 4. RSI في منطقة التشبع البيعي
+    rsi = last.get('rsi', 50)
+    atr_percent = last.get('atr_percent', 0)
+    
+    # نطاق RSI يتغير حسب التقلب
+    rsi_threshold = 35 if atr_percent < 2.5 else 38
+    
+    if rsi >= rsi_threshold:
+        return False
+    
+    # 5. زيادة الحجم عند الارتداد (مقارنة بالشمعة السابقة)
+    volume_increase = last['volume'] > prev['volume'] * 1.1
+    
+    if not volume_increase:
+        return False
+    
+    # 6. فلتر إضافي: التأكد من عدم وجود اتجاه هابط قوي في الإطار الزمني الأعلى
+    if mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish':
+        return False
     
     return True
 # --- نهاية الاستراتيجيات ---
@@ -1194,103 +1387,156 @@ def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
         logger.error(f"❌ [{symbol}] Error formatting quantity: {e}. Returning raw value string.")
         return str(quantity)
 
-def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
+# ===== FIXED: Position Size Calculation =====
+def adjust_quantity_to_lot_size(symbol: str, quantity: float, 
+                                      exchange_info_map: dict = exchange_info_map, logger=logger) -> Optional[Decimal]:
+    """
+    ضبط الكمية حسب LOT_SIZE مع معالجة أفضل للأخطاء.
+    """
+    from decimal import Decimal, ROUND_DOWN
+    
     try:
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
-            logger.error(f"[{symbol}] No exchange info found for LOT_SIZE adjustment.")
+            logger.error(f"[{symbol}] معلومات الرمز غير موجودة في exchange_info_map")
             return None
-        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+            
+        lot_size_filter = next((f for f in symbol_info['filters'] 
+                               if f['filterType'] == 'LOT_SIZE'), None)
+        
         if not lot_size_filter:
-            logger.warning(f"[{symbol}] LOT_SIZE filter not found. Using raw quantity.")
+            logger.warning(f"[{symbol}] LOT_SIZE filter غير موجود، استخدام الكمية الخام")
             return Decimal(str(quantity))
+        
         step_size = Decimal(lot_size_filter['stepSize'])
         min_qty = Decimal(lot_size_filter['minQty'])
+        max_qty = Decimal(lot_size_filter.get('maxQty', '9000000000'))
+        
         quantity_dec = Decimal(str(quantity))
+        
+        # التحقق من min_qty
         if quantity_dec < min_qty:
-            log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Below minQty", "qty": f"{quantity_dec}", "min": f"{min_qty}"})
+            logger.warning(f"[{symbol}] الكمية {quantity_dec} أقل من minQty {min_qty}")
             return None
-        adjusted_quantity = (quantity_dec - (quantity_dec % step_size))
+        
+        # التحقق من max_qty
+        if quantity_dec > max_qty:
+            logger.warning(f"[{symbol}] الكمية {quantity_dec} أكبر من maxQty {max_qty}")
+            quantity_dec = max_qty
+        
+        # ضبط الكمية حسب step_size
+        adjusted_quantity = (quantity_dec // step_size) * step_size
+        
+        # التحقق النهائي
         if adjusted_quantity < min_qty:
-            log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Adjusted below minQty", "qty": f"{adjusted_quantity}", "min": f"{min_qty}"})
+            logger.warning(f"[{symbol}] الكمية المعدلة {adjusted_quantity} أقل من minQty {min_qty}")
             return None
+        
         return adjusted_quantity
+        
     except Exception as e:
-        logger.error(f"❌ [{symbol}] CRITICAL ERROR adjusting quantity: {e}", exc_info=True)
+        logger.error(f"❌ [{symbol}] خطأ في ضبط LOT_SIZE: {e}", exc_info=True)
         return None
 
-def calculate_position_size(symbol: str, entry_price: float, available_balance: float, is_real: bool) -> Optional[Decimal]:
-    desired_usdt_amount = 0.0
+def calculate_position_size(symbol: str, entry_price: float, 
+                                  available_balance: float, is_real: bool,
+                                  exchange_info_map: dict = exchange_info_map, logger=logger) -> Optional[Decimal]:
+    """
+    حساب حجم الصفقة مع معالجة صحيحة لجميع الحالات.
+    
+    التحسينات:
+    1. التأكد من عدم تجاوز الرصيد المتاح
+    2. معالجة min_notional بشكل صحيح
+    3. إعادة الكمية الصحيحة أو None
+    4. تسجيل تفصيلي للأخطاء
+    """
+    from decimal import Decimal, ROUND_DOWN
+    
+    # تحديد المبلغ المطلوب
     if not is_real:
-        desired_usdt_amount = PAPER_TRADE_FIXED_AMOUNT_USDT
+        desired_usdt_amount = 10.0  # ثابت للصفقات الورقية
     else:
-        with trade_amount_lock:
-            desired_usdt_amount = random.uniform(FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT)
+        import random
+        desired_usdt_amount = random.uniform(4.5, 6.5)
 
     try:
         dec_entry = Decimal(str(entry_price))
         if dec_entry <= 0:
-            logger.error(f"[{symbol}] Invalid entry price (zero or negative).")
+            logger.error(f"[{symbol}] سعر الدخول غير صحيح: {entry_price}")
             return None
         
         dec_balance = Decimal(str(available_balance))
         dec_desired_amount = Decimal(str(desired_usdt_amount))
         
-        logger.info(f"[{symbol}] Starting position sizing. Desired amount: ${dec_desired_amount:.2f}")
+        logger.info(f"[{symbol}] حساب الكمية: المبلغ المطلوب ${dec_desired_amount:.2f}, الرصيد المتاح ${dec_balance:.2f}")
 
+        # تحقق أولي: هل الرصيد كافٍ؟
         if is_real and dec_desired_amount > dec_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_desired_amount:.2f}", "available": f"${dec_balance:.2f}"})
+            logger.warning(f"[{symbol}] الرصيد غير كافٍ: مطلوب ${dec_desired_amount:.2f}, متاح ${dec_balance:.2f}")
             return None
 
+        # حساب الكمية الأولية
         initial_quantity = dec_desired_amount / dec_entry
+        
+        # ضبط الكمية حسب LOT_SIZE
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
 
-        if adjusted_quantity is None:
-             logger.warning(f"[{symbol}] Initial quantity adjustment failed (likely too small). Will check against MIN_NOTIONAL.")
-             adjusted_quantity = Decimal('0')
+        if adjusted_quantity is None or adjusted_quantity <= 0:
+            logger.warning(f"[{symbol}] فشل ضبط الكمية حسب LOT_SIZE")
+            return None
 
+        # حساب القيمة الاسمية
         notional_value = adjusted_quantity * dec_entry
 
+        # الحصول على min_notional من معلومات البورصة
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
-            min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+            min_notional_filter = next((f for f in symbol_info['filters'] 
+                                       if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
             
             if min_notional_filter:
-                min_notional_str = min_notional_filter.get('minNotional', min_notional_filter.get('notional', '5.0'))
+                min_notional_str = min_notional_filter.get('minNotional', 
+                                                           min_notional_filter.get('notional', '5.0'))
                 min_notional = Decimal(min_notional_str)
                 
+                # إذا كانت القيمة أقل من min_notional
                 if notional_value < min_notional:
-                    logger.warning(f"[{symbol}] Notional value ${notional_value:.2f} is below min_notional ${min_notional}. Attempting to adjust.")
+                    logger.warning(f"[{symbol}] القيمة الاسمية ${notional_value:.2f} أقل من min_notional ${min_notional}")
                     
+                    # حساب القيمة المطلوبة (مع هامش 1%)
                     required_notional = min_notional * Decimal('1.01')
                     
+                    # تحقق: هل الرصيد كافٍ؟
                     if is_real and required_notional > dec_balance:
-                        log_rejection(symbol, "Insufficient Balance", {"reason": "Cannot meet min_notional", "required": f"${required_notional:.2f}", "available": f"${dec_balance:.2f}"})
+                        logger.error(f"[{symbol}] لا يمكن تلبية min_notional: مطلوب ${required_notional:.2f}, متاح ${dec_balance:.2f}")
                         return None
                         
+                    # حساب الكمية الجديدة
                     new_quantity = required_notional / dec_entry
                     adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(new_quantity))
 
                     if adjusted_quantity is None or adjusted_quantity <= 0:
-                        log_rejection(symbol, "MinNotional Filter Failed", {"reason": "Failed to adjust quantity for min_notional"})
+                        logger.error(f"[{symbol}] فشل ضبط الكمية لتلبية min_notional")
                         return None
 
+                    # إعادة حساب القيمة الاسمية
                     notional_value = adjusted_quantity * dec_entry
-                    logger.info(f"[{symbol}] Quantity adjusted to meet min_notional. New quantity: {adjusted_quantity}, New notional: ${notional_value:.2f}")
+                    logger.info(f"[{symbol}] تم تعديل الكمية لتلبية min_notional: كمية={adjusted_quantity}, قيمة=${notional_value:.2f}")
 
+        # تحقق نهائي: هل القيمة الاسمية ضمن الرصيد المتاح؟
         if notional_value <= 0:
-             log_rejection(symbol, "MinNotional Filter Failed", {"reason": "Final notional value is zero after all adjustments."})
-             return None
+            logger.error(f"[{symbol}] القيمة الاسمية النهائية صفر أو سالبة!")
+            return None
 
         if is_real and notional_value > dec_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"${dec_balance:.2f}"})
+            logger.error(f"[{symbol}] القيمة النهائية ${notional_value:.2f} تتجاوز الرصيد ${dec_balance:.2f}")
             return None
             
-        logger.info(f"[{symbol}] Final valid quantity: {adjusted_quantity} (Notional: ${notional_value:.2f})")
+        logger.info(f"[{symbol}] ✅ الكمية النهائية الصحيحة: {adjusted_quantity} (قيمة اسمية: ${notional_value:.2f})")
         return adjusted_quantity
 
     except Exception as e:
-        logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
+        logger.error(f"❌ [{symbol}] خطأ حرج في حساب حجم الصفقة: {e}", exc_info=True)
         return None
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
