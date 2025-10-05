@@ -4,6 +4,7 @@
 # 2. [إصلاح فلتر التقلب] تم تخفيض الحد الأدنى لتقلب السوق (ATR) للسماح للبوت بالعثور على صفقات في ظروف السوق الأقل تقلباً.
 # 3. [تحسينات طفيفة] تم إجراء تعديلات طفيفة على فلاتر ADX لتكون أقل صرامة.
 # 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام.
+# 5. [تحديثات متقدمة] تم دمج نظام نقاط الجودة، حجم الصفقات الديناميكي، ووقف الخسارة المتحرك الذكي.
 
 import time
 import os
@@ -674,6 +675,54 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
     
     return df_calc
+
+# ===== NEW: Signal Quality Scoring System =====
+def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
+    """
+    يحسب نقاط جودة للإشارة (من 0 إلى 100) بناءً على عدة عوامل فنية.
+    هذا يسمح للبوت بالتركيز فقط على أفضل الفرص.
+    """
+    score = 0
+    last = df.iloc[-1]
+    
+    # 1. قوة الاتجاه (Trend Strength) - (Max 25 points)
+    ema_spread = (last['ema21'] - last['ema50']) / last['close'] * 100
+    if ema_spread > 0.5:
+        score += 25  # اتجاه قوي جداً
+    elif ema_spread > 0.2:
+        score += 15  # اتجاه جيد
+    
+    # 2. تأكيد الحجم (Volume Confirmation) - (Max 20 points)
+    volume_ma20 = df['volume'].rolling(20).mean().iloc[-1]
+    if last['volume'] > volume_ma20 * 2:
+        score += 20  # حجم استثنائي
+    elif last['volume'] > volume_ma20 * 1.5:
+        score += 10  # حجم جيد
+        
+    # 3. زخم المؤشرات (Indicator Momentum) - (Max 25 points)
+    # RSI
+    if 60 < last['rsi'] < 70:
+        score += 15  # زخم RSI مثالي
+    elif last['rsi'] > 55:
+        score += 5
+    # MACD
+    if last['macd_hist'] > 0 and df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2]:
+        score += 10 # زخم MACD إيجابي ومتزايد
+        
+    # 4. التوافق الزمني (Multi-Timeframe Alignment) - (Max 20 points)
+    if mtf_trend.get('15m') == 'bullish':
+        score += 10
+    if mtf_trend.get('1h') == 'bullish':
+        score += 10
+        
+    # 5. التقلب (Volatility) - (Max 10 points)
+    atr_percent = last.get('atr_percent', 0)
+    if 1.0 < atr_percent < 2.5:
+        score += 10  # تقلب مثالي للتداول
+    elif 0.7 < atr_percent < 3.5:
+        score += 5
+
+    return min(100, int(score))
 
 # --- Data Loading & Settings Management ---
 def load_open_signals_to_cache():
@@ -1438,26 +1487,19 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float,
         logger.error(f"❌ [{symbol}] خطأ في ضبط LOT_SIZE: {e}", exc_info=True)
         return None
 
-def calculate_position_size(symbol: str, entry_price: float, 
+def calculate_position_size_fixed(symbol: str, entry_price: float, 
                                   available_balance: float, is_real: bool,
-                                  exchange_info_map: dict = exchange_info_map, logger=logger) -> Optional[Decimal]:
+                                  exchange_info_map: dict = exchange_info_map, logger=logger,
+                                  override_amount: Optional[float] = None) -> Optional[Decimal]:
     """
-    حساب حجم الصفقة مع معالجة صحيحة لجميع الحالات.
-    
-    التحسينات:
-    1. التأكد من عدم تجاوز الرصيد المتاح
-    2. معالجة min_notional بشكل صحيح
-    3. إعادة الكمية الصحيحة أو None
-    4. تسجيل تفصيلي للأخطاء
+    حساب حجم الصفقة مع معالجة صحيحة لجميع الحالات (النسخة الأساسية الآمنة).
     """
-    from decimal import Decimal, ROUND_DOWN
-    
-    # تحديد المبلغ المطلوب
-    if not is_real:
-        desired_usdt_amount = 10.0  # ثابت للصفقات الورقية
+    if override_amount is not None:
+        desired_usdt_amount = override_amount
+    elif not is_real:
+        desired_usdt_amount = PAPER_TRADE_FIXED_AMOUNT_USDT
     else:
-        import random
-        desired_usdt_amount = random.uniform(4.5, 6.5)
+        desired_usdt_amount = random.uniform(FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT)
 
     try:
         dec_entry = Decimal(str(entry_price))
@@ -1470,48 +1512,34 @@ def calculate_position_size(symbol: str, entry_price: float,
         
         logger.info(f"[{symbol}] حساب الكمية: المبلغ المطلوب ${dec_desired_amount:.2f}, الرصيد المتاح ${dec_balance:.2f}")
 
-        # تحقق أولي: هل الرصيد كافٍ؟
         if is_real and dec_desired_amount > dec_balance:
             logger.warning(f"[{symbol}] الرصيد غير كافٍ: مطلوب ${dec_desired_amount:.2f}, متاح ${dec_balance:.2f}")
             return None
 
-        # حساب الكمية الأولية
         initial_quantity = dec_desired_amount / dec_entry
-        
-        # ضبط الكمية حسب LOT_SIZE
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
 
         if adjusted_quantity is None or adjusted_quantity <= 0:
             logger.warning(f"[{symbol}] فشل ضبط الكمية حسب LOT_SIZE")
             return None
 
-        # حساب القيمة الاسمية
         notional_value = adjusted_quantity * dec_entry
-
-        # الحصول على min_notional من معلومات البورصة
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
-            min_notional_filter = next((f for f in symbol_info['filters'] 
-                                       if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+            min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
             
             if min_notional_filter:
-                min_notional_str = min_notional_filter.get('minNotional', 
-                                                           min_notional_filter.get('notional', '5.0'))
+                min_notional_str = min_notional_filter.get('minNotional', min_notional_filter.get('notional', '5.0'))
                 min_notional = Decimal(min_notional_str)
                 
-                # إذا كانت القيمة أقل من min_notional
                 if notional_value < min_notional:
                     logger.warning(f"[{symbol}] القيمة الاسمية ${notional_value:.2f} أقل من min_notional ${min_notional}")
-                    
-                    # حساب القيمة المطلوبة (مع هامش 1%)
                     required_notional = min_notional * Decimal('1.01')
                     
-                    # تحقق: هل الرصيد كافٍ؟
                     if is_real and required_notional > dec_balance:
                         logger.error(f"[{symbol}] لا يمكن تلبية min_notional: مطلوب ${required_notional:.2f}, متاح ${dec_balance:.2f}")
                         return None
                         
-                    # حساب الكمية الجديدة
                     new_quantity = required_notional / dec_entry
                     adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(new_quantity))
 
@@ -1519,11 +1547,9 @@ def calculate_position_size(symbol: str, entry_price: float,
                         logger.error(f"[{symbol}] فشل ضبط الكمية لتلبية min_notional")
                         return None
 
-                    # إعادة حساب القيمة الاسمية
                     notional_value = adjusted_quantity * dec_entry
                     logger.info(f"[{symbol}] تم تعديل الكمية لتلبية min_notional: كمية={adjusted_quantity}, قيمة=${notional_value:.2f}")
 
-        # تحقق نهائي: هل القيمة الاسمية ضمن الرصيد المتاح؟
         if notional_value <= 0:
             logger.error(f"[{symbol}] القيمة الاسمية النهائية صفر أو سالبة!")
             return None
@@ -1539,7 +1565,56 @@ def calculate_position_size(symbol: str, entry_price: float,
         logger.error(f"❌ [{symbol}] خطأ حرج في حساب حجم الصفقة: {e}", exc_info=True)
         return None
 
-def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
+# ===== UPDATED: Position Size Calculation (Now Dynamic) =====
+def calculate_dynamic_position_size(
+    symbol: str, 
+    entry_price: float, 
+    available_balance: float, 
+    is_real: bool,
+    quality_score: int,
+    atr_percent: float,
+    exchange_info_map: dict, 
+    logger
+) -> Optional[Decimal]:
+    """
+    حساب حجم الصفقة بشكل ديناميكي بناءً على جودة الإشارة وتقلب السوق.
+    """
+    # 1. تحديد مبلغ الأساس بناءً على وضع التداول
+    if not is_real:
+        base_usdt_amount = PAPER_TRADE_FIXED_AMOUNT_USDT
+    else:
+        base_usdt_amount = random.uniform(FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT)
+
+    # 2. تعديل المبلغ بناءً على جودة الإشارة
+    quality_modifier = 1.0
+    if quality_score > 85:
+        quality_modifier = 1.25  # زيادة 25% للفرص الممتازة
+    elif quality_score < 70:
+        quality_modifier = 0.85   # تقليل 15% للفرص الأضعف
+
+    # 3. تعديل المبلغ بناءً على تقلب السوق (مخاطرة عكسية)
+    volatility_modifier = 1.0
+    if atr_percent > 3.0:
+        volatility_modifier = 0.80  # تقليل 20% في الأسواق شديدة التقلب
+    elif atr_percent < 0.8:
+        volatility_modifier = 1.15  # زيادة 15% في الأسواق الهادئة
+
+    # 4. حساب المبلغ النهائي المطلوب
+    desired_usdt_amount = base_usdt_amount * quality_modifier * volatility_modifier
+    
+    logger.info(
+        f"[{symbol}] Dynamic Size: Base=${base_usdt_amount:.2f}, "
+        f"QualityMod={quality_modifier:.2f}, VolatilityMod={volatility_modifier:.2f} -> "
+        f"Final Desired=${desired_usdt_amount:.2f}"
+    )
+    
+    # 5. استخدام دالة حساب الحجم الآمنة مع المبلغ الديناميكي الجديد
+    return calculate_position_size_fixed(
+        symbol, entry_price, available_balance, is_real, 
+        exchange_info_map, logger, override_amount=desired_usdt_amount
+    )
+
+def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, mtf_trend: Dict):
     df.strategy = strategy_name 
     
     if not check_market_volatility_filter_enhanced(df, symbol): return
@@ -1547,7 +1622,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
     if not add_correlation_filter(symbol): log_rejection(symbol, "Correlation Filter Failed"); return
 
-    quality_score = 75 # Placeholder value
+    quality_score = calculate_signal_quality_score(df, mtf_trend)
     with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
     if quality_score < min_score:
         log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
@@ -1564,9 +1639,10 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
 
     with trading_mode_lock: is_real = not paper_trading_mode
     
+    atr_percent = df.iloc[-1].get('atr_percent', 0)
     signal_details = {
         "atr": df.iloc[-1].get('atr', 0), "trailing_stop_activated": False, "tp1_done": False,
-        "quality_score": quality_score, "atr_percent": df.iloc[-1].get('atr_percent', 0)
+        "quality_score": quality_score, "atr_percent": atr_percent
     }
     
     trade_levels = {
@@ -1578,7 +1654,9 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     with balance_lock:
         current_real_balance = usdt_balance
 
-    quantity_dec = calculate_position_size(symbol, entry_price, current_real_balance, is_real)
+    quantity_dec = calculate_dynamic_position_size(
+        symbol, entry_price, current_real_balance, is_real, quality_score, atr_percent, exchange_info_map, logger
+    )
 
     if quantity_dec is None or quantity_dec <= 0:
         logger.error(f"❌ [{symbol}] Position size calculation failed. Trade rejected.")
@@ -1607,7 +1685,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             send_trade_open_notification(
                 symbol, strategy_name, float(avg_fill_price),
                 stop_loss_price, target_price_1, target_price_2, float(final_quantity),
-                is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value
+                is_real, quality_score, atr_percent, notional_value
             )
         except BinanceAPIException as e:
             logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
@@ -1618,9 +1696,8 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, float(quantity_dec), signal_details)
         send_trade_open_notification(
             symbol, strategy_name, entry_price, stop_loss_price, target_price_1, target_price_2,
-            float(quantity_dec), is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value
+            float(quantity_dec), is_real, quality_score, atr_percent, notional_value
         )
-        # لا يتم خصم أي شيء من الرصيد في الصفقات الورقية
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -2491,6 +2568,47 @@ function updateEquityChart(equityData) {
 </html>
 """
 
+# ===== NEW: Intelligent Trailing Stop-Loss Logic =====
+def manage_intelligent_trailing_stop(signal: Dict, current_price: float, df: pd.DataFrame) -> Optional[Dict]:
+    """
+    إدارة وقف الخسارة المتحرك الذكي.
+    يتم تفعيله بعد الهدف الأول ويتبع السعر بناءً على قيعان الشموع أو ATR.
+    """
+    details = signal.get('signal_details', {})
+    if not isinstance(details, dict): details = {}
+
+    # يجب أن يكون الهدف الأول قد تحقق لتفعيل الوقف المتحرك
+    if not details.get('tp1_done'):
+        return None
+
+    current_stop_loss = float(signal['stop_loss'])
+    new_potential_sl = None
+
+    # الطريقة الأولى: استخدام قيعان الشموع الأخيرة (أكثر استقراراً)
+    try:
+        # ابحث عن أدنى قاع في آخر 3 شمعات (باستثناء الشمعة الحالية)
+        recent_low = df['low'].iloc[-4:-1].min()
+        
+        # أضف هامش أمان صغير
+        potential_sl_swing = recent_low * Decimal('0.998')
+        
+        if potential_sl_swing > current_stop_loss:
+            new_potential_sl = float(potential_sl_swing)
+            
+    except Exception:
+        # الطريقة الثانية: استخدام ATR (كخيار احتياطي)
+        atr_value = df.iloc[-1].get('atr', 0)
+        if atr_value > 0:
+            potential_sl_atr = current_price - (atr_value * 2.5)
+            if potential_sl_atr > current_stop_loss:
+                new_potential_sl = potential_sl_atr
+
+    if new_potential_sl and new_potential_sl > current_stop_loss:
+        logger.info(f"[{signal['symbol']}] Trailing SL Update: From {current_stop_loss:.5f} to {new_potential_sl:.5f}")
+        return {"stop_loss": new_potential_sl}
+
+    return None
+
 # --- مسارات Flask ---
 @app.route('/')
 def dashboard(): return render_template_string(DASHBOARD_TEMPLATE)
@@ -2876,7 +2994,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
     
 def get_mtf_trend(symbol: str) -> Dict[str, str]:
     trends = {}
-    timeframes = {'5m': 7, '15m': 10} # Adjusted for 5m strategy
+    timeframes = {'5m': 7, '15m': 10, '1h': 12} 
 
     for tf, days in timeframes.items():
         try:
@@ -2907,7 +3025,6 @@ def main_bot_loop():
         try:
             while True:
                 now = datetime.now(timezone.utc)
-                # Adjusted for 5-minute candles
                 seconds_until_next_candle = (5 - (now.minute % 5)) * 60 - now.second
                 
                 is_enabled_now = False
@@ -2955,7 +3072,7 @@ def main_bot_loop():
 
 
                 if strategy_found:
-                    create_trade_signal(symbol, df_featured, strategy_found)
+                    create_trade_signal(symbol, df_featured, strategy_found, mtf_trend)
 
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
@@ -3002,7 +3119,6 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
                 available_on_exchange = Decimal(asset_balance_info.get('free', '0.0'))
                 logger.info(f"💰 [Real Close] For {symbol}: Bot wants to sell {quantity_in_bot}, Available on Binance: {available_on_exchange}")
                 
-                # نستخدم الكمية المتاحة فعلياً في المنصة لضمان بيع كل شيء
                 quantity_to_sell = available_on_exchange
                 
                 if quantity_to_sell > 0:
@@ -3023,8 +3139,6 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
             logger.error(f"❌ [Real Close] CRITICAL ERROR for {symbol}: {e}", exc_info=True)
 
     profit = ((closing_price - entry_price) / entry_price) * 100
-    
-    # لا يوجد أي تعديل على الرصيد للصفقات الورقية
     
     with consecutive_losses_lock:
         if profit < 0: consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
@@ -3086,20 +3200,17 @@ def trade_management_loop():
                     update_signal_in_db(signal['id'], updates)
                     send_enhanced_telegram_message(f"🥇 *تحقق الهدف الأول* لـ `{symbol}`\nتم إقفال 50% من العقد وتحريك الوقف إلى نقطة الدخول.")
                     
-                    # لا يوجد تعديل على الرصيد للصفقات الورقية
                     continue
-                
-                profit_pct = ((current_price - entry_price) / max(entry_price, 1e-8)) * 100 if entry_price else 0
-                if not details.get('trailing_active') and profit_pct >= TRAILING_STOP_ACTIVATION_PROFIT_PERCENT:
-                    details['trailing_active'] = True
-                    update_signal_in_db(signal['id'], {"signal_details": json.dumps(details)})
-                    send_enhanced_telegram_message(f"📈 *تفعيل الوقف المتحرك* لـ `{symbol}` عند ربح `{profit_pct:.2f}%`.")
-                
-                if details.get('trailing_active'):
-                    new_sl = max(stop_loss, current_price * (1 - (TRAILING_STOP_ACTIVATION_PROFIT_PERCENT / 200)))
-                    if new_sl > stop_loss:
-                        update_signal_in_db(signal['id'], {"stop_loss": new_sl})
-                        # send_enhanced_telegram_message(f"🔧 *تحديث الوقف المتحرك* لـ `{symbol}` → `{new_sl:.6f}`")
+
+                # NEW: Intelligent Trailing Stop Logic
+                if details.get('tp1_done'):
+                    recent_df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days=2)
+                    if recent_df is not None and not recent_df.empty:
+                        recent_df_featured = calculate_all_features(recent_df)
+                        trailing_update = manage_intelligent_trailing_stop(signal, current_price, recent_df_featured)
+                        if trailing_update:
+                            update_signal_in_db(signal['id'], trailing_update)
+
             time.sleep(1)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] Loop error: {e}", exc_info=True)
@@ -3147,7 +3258,6 @@ def start_market_state_updater():
     logger.info("[Market State] Started market state updater thread")
 
 def update_balance():
-    # هذه الدالة الآن تحدث الرصيد الحقيقي دائمًا
     try:
         balance_info = client.get_asset_balance(asset='USDT')
         with balance_lock:
@@ -3183,7 +3293,7 @@ if __name__ == '__main__':
     load_notifications_to_cache()
     load_settings_from_redis()
     logger.info("Fetching initial real account balance...")
-    update_balance() # جلب الرصيد الحقيقي عند بدء التشغيل
+    update_balance()
     with balance_lock:
         logger.info(f"Initial real balance fetched: ${usdt_balance:.2f}")
 
