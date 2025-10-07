@@ -1,10 +1,8 @@
-# ملف c4_5min_v34_1_1.py - نسخة V34.1.1 (إصلاح مرونة الفلاتر للسوق الهادئ)
+# ملف c4_5min_v34_1_2.py - نسخة V34.1.2 (إصلاح خطأ العثور على معلومات الرمز)
 # --- وصف التعديلات:
-# 1. [إصلاح فلتر فيبوناتشي] تم توسيع نطاق قبول تصحيح فيبوناتشي بشكل كبير ليكون أكثر مرونة ويقلل من حالات الرفض.
-# 2. [إصلاح فلتر التقلب] تم تخفيض الحد الأدنى لتقلب السوق (ATR) للسماح للبوت بالعثور على صفقات في ظروف السوق الأقل تقلباً.
-# 3. [تحسينات طفيفة] تم إجراء تعديلات طفيفة على فلاتر ADX وفلاتر الحجم لتكون أقل صرامة.
-# 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام.
-# 5. [تحديثات متقدمة] تم دمج نظام نقاط الجودة، حجم الصفقات الديناميكي، ووقف الخسارة المتحرك الذكي.
+# 1. [إصلاح حاسم] تم تعزيز دالة `get_validated_symbols` للتأكد من أن `exchange_info_map` محملة بالكامل قبل تصفية العملات، مما يمنع خطأ "معلومات الرمز غير موجودة".
+# 2. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام.
+# 3. [الحفاظ على المرونة] تم الإبقاء على تعديلات المرونة في الفلاتر من النسخة السابقة.
 
 import time
 import os
@@ -49,7 +47,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV34.1.1_5min')
+logger = logging.getLogger('CryptoBotV34.1.2_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -429,7 +427,6 @@ def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: f
     
     send_enhanced_telegram_message(message, force=True)
 
-# --- (Other helper functions like reports, websocket, etc. remain the same) ---
 def send_daily_performance_report():
     if not check_db_connection() or not conn:
         return
@@ -567,26 +564,59 @@ def get_exchange_info_map() -> None:
     global exchange_info_map
     try:
         logger.info("[API] Fetching exchange info...")
-        exchange_info_map = {s['symbol']: s for s in client.get_exchange_info()['symbols']}
+        info = client.get_exchange_info()
+        if not info or 'symbols' not in info:
+            logger.error("❌ [API] FAILED to fetch valid exchange info. Response was empty or malformed.")
+            return
+        exchange_info_map = {s['symbol']: s for s in info['symbols']}
         logger.info(f"✅ [API] Exchange info map created with {len(exchange_info_map)} symbols.")
     except Exception as e:
         logger.error(f"❌ [API] Error fetching exchange info: {e}")
 
+# [--- تعديل ---] الدالة التالية تم تعزيزها لتكون أكثر أمانًا
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    يقوم بتحميل الرموز من الملف، ويتحقق من صحتها مقابل المعلومات المحملة من المنصة،
+    مع التأكد من أن exchange_info_map ليست فارغة قبل المتابعة.
+    """
     try:
+        # [--- تعديل ---] التأكد من أن exchange_info_map ليست فارغة قبل أي شيء آخر
+        if not exchange_info_map:
+            logger.critical("❌ [Symbols] `exchange_info_map` is empty. Cannot validate symbols. Retrying to fetch...")
+            get_exchange_info_map() # محاولة استردادها مرة أخرى
+            if not exchange_info_map:
+                 logger.critical("❌ [Symbols] Failed to fetch `exchange_info_map` on second attempt. Exiting validation.")
+                 return []
+
         file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
         if not os.path.exists(file_path):
-            logger.critical(f"❌ Symbol list file '{filename}' not found!"); return []
+            logger.critical(f"❌ Symbol list file '{filename}' not found at '{file_path}'!"); return []
+        
         with open(file_path, 'r', encoding='utf-8') as f:
+            # استخدام .strip() لإزالة أي مسافات بيضاء غير مرئية قد تسبب مشاكل
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+        
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
-        if not exchange_info_map: get_exchange_info_map()
-        active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
+        
+        # [--- تعديل ---] فلترة أكثر دقة للرموز القابلة للتداول فعليًا
+        active = {
+            s for s, info in exchange_info_map.items() 
+            if info.get('quoteAsset') == 'USDT' and 
+               info.get('status') == 'TRADING' and
+               'SPOT' in info.get('permissions', [])
+        }
+        
         validated = sorted(list(formatted.intersection(active)))
-        logger.info(f"✅ Found {len(validated)} valid symbols for trading.")
+        
+        if not validated:
+             logger.warning("⚠️ [Symbols] No valid symbols found after validation. Check `crypto_list.txt` and Binance status.")
+        else:
+             logger.info(f"✅ Found {len(validated)} valid and tradable symbols.")
+        
         return validated
     except Exception as e:
-        logger.error(f"❌ [Symbols] Error validating symbols: {e}"); return []
+        logger.error(f"❌ [Symbols] A critical error occurred while validating symbols: {e}", exc_info=True)
+        return []
 # --- نهاية دوال المساعدة ---
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
@@ -676,38 +706,31 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     
     return df_calc
 
-# ===== NEW: Signal Quality Scoring System =====
 def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
-    """
-    يحسب نقاط جودة للإشارة (من 0 إلى 100) بناءً على عدة عوامل فنية.
-    هذا يسمح للبوت بالتركيز فقط على أفضل الفرص.
-    """
     score = 0
     last = df.iloc[-1]
     
     # 1. قوة الاتجاه (Trend Strength) - (Max 25 points)
     ema_spread = (last['ema21'] - last['ema50']) / last['close'] * 100
     if ema_spread > 0.5:
-        score += 25  # اتجاه قوي جداً
+        score += 25
     elif ema_spread > 0.2:
-        score += 15  # اتجاه جيد
+        score += 15
     
     # 2. تأكيد الحجم (Volume Confirmation) - (Max 20 points)
     volume_ma20 = df['volume'].rolling(20).mean().iloc[-1]
     if last['volume'] > volume_ma20 * 2:
-        score += 20  # حجم استثنائي
+        score += 20
     elif last['volume'] > volume_ma20 * 1.5:
-        score += 10  # حجم جيد
+        score += 10
         
     # 3. زخم المؤشرات (Indicator Momentum) - (Max 25 points)
-    # RSI
     if 60 < last['rsi'] < 70:
-        score += 15  # زخم RSI مثالي
+        score += 15
     elif last['rsi'] > 55:
         score += 5
-    # MACD
     if last['macd_hist'] > 0 and df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2]:
-        score += 10 # زخم MACD إيجابي ومتزايد
+        score += 10
         
     # 4. التوافق الزمني (Multi-Timeframe Alignment) - (Max 20 points)
     if mtf_trend.get('15m') == 'bullish':
@@ -718,13 +741,12 @@ def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
     # 5. التقلب (Volatility) - (Max 10 points)
     atr_percent = last.get('atr_percent', 0)
     if 1.0 < atr_percent < 2.5:
-        score += 10  # تقلب مثالي للتداول
+        score += 10
     elif 0.7 < atr_percent < 3.5:
         score += 5
 
     return min(100, int(score))
 
-# --- Data Loading & Settings Management ---
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
     try:
@@ -818,61 +840,46 @@ def save_settings_to_redis():
         logger.error(f"Error saving settings to Redis: {e}")
         return False
 
-# --- الفلاتر الديناميكية ونظام السوق ---
-
-# ===== FIXED: Elliott Wave Fibonacci Retracement =====
 def get_wave_retracement(df: pd.DataFrame) -> float:
-    """
-    حساب نسبة تصحيح فيبوناتشي للموجة الأخيرة.
-    يرجع قيمة بين 0 و 1، أو -1.0 في حالة الفشل (وليس 999.0).
-    """
     try:
         highs = df['high'].values
         lows = df['low'].values
         
-        # البحث عن القمم والقيعان المحلية
         peaks_idx = argrelextrema(highs, np.greater, order=5)[0]
         troughs_idx = argrelextrema(lows, np.less, order=5)[0]
         
-        # نحتاج على الأقل قمة واحدة وقاعين
         if len(peaks_idx) < 1 or len(troughs_idx) < 2:
-            return -1.0  # فشل: بيانات غير كافية
+            return -1.0
         
-        # القاع الأخير (بداية التصحيح)
         last_trough_idx = troughs_idx[-1]
         
-        # القمة السابقة له
         prev_peak_idx = peaks_idx[peaks_idx < last_trough_idx]
         if len(prev_peak_idx) == 0:
-            return -1.0  # لا توجد قمة قبل القاع الأخير
+            return -1.0
         prev_peak_idx = prev_peak_idx[-1]
         
-        # القاع السابق للقمة (بداية الموجة)
         prev_trough_idx = troughs_idx[troughs_idx < prev_peak_idx]
         if len(prev_trough_idx) == 0:
-            return -1.0  # لا يوجد قاع قبل القمة
+            return -1.0
         prev_trough_idx = prev_trough_idx[-1]
 
-        # حساب نسبة التصحيح
         wave_start_price = lows[prev_trough_idx]
         wave_end_price = highs[prev_peak_idx]
         retracement_price = lows[last_trough_idx]
 
         wave_height = wave_end_price - wave_start_price
         if wave_height <= 0:
-            return -1.0  # ارتفاع الموجة غير صحيح
+            return -1.0
         
-        # نسبة فيبوناتشي = (القمة - القاع الأخير) / ارتفاع الموجة
         retracement = (wave_end_price - retracement_price) / wave_height
         
-        # التأكد من أن القيمة منطقية (بين 0 و 1.5)
         if 0 <= retracement <= 1.5:
             return retracement
         else:
-            return -1.0  # قيمة غير منطقية
+            return -1.0
             
     except Exception as e:
-        return -1.0  # خطأ في الحساب
+        return -1.0
 
 def check_bb_stoch_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
@@ -881,10 +888,9 @@ def check_bb_stoch_dynamic_filters(df: pd.DataFrame) -> Dict:
     bb_width = df['bb_width']
     dynamic_bb_threshold = bb_width.rolling(20).mean() * 1.2
 
-    stoch_threshold = 23 if atr_percent > 1.5 else 18 # Adjusted for 5m
+    stoch_threshold = 23 if atr_percent > 1.5 else 18
     
     volume_ma = df['volume'].rolling(20).mean()
-    # [--- تعديل ---] تخفيف طفيف لمتطلب الحجم
     volume_multiplier = 1.0 + (atr_percent / 120) 
     
     return {
@@ -897,12 +903,10 @@ def check_macd_ema_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    # [--- تعديل ---] تخفيض الحد الأدنى لـ ADX ليكون أقل صرامة
     default_adx_thresh = 17 if atr_percent > 1.5 else 14
     adx_threshold = default_adx_thresh
     
     volume_ma = df['volume'].rolling(20).mean()
-    # [--- تعديل ---] تخفيف متطلب الحجم المرتبط بالتقلب
     volatility_adjusted_volume = volume_ma * (1 + atr_percent / 100)
     
     macd_momentum = df['macd_hist'].diff()
@@ -924,11 +928,9 @@ def check_ema_rsi_dynamic_filters(df: pd.DataFrame) -> Dict:
         rsi_lower, rsi_upper = 48, 72
     
     ema_spread = (df['ema9'] - df['ema21']) / df['ema21'].replace(0, 1e-9)
-    # [--- تعديل ---] تقليل مضاعف حساسية تباعد المتوسطات
     dynamic_ema_threshold = ema_spread.rolling(20).std() * 1.5
     
     volume_ma = df['volume'].rolling(20).mean()
-    # [--- تعديل ---] تخفيف متطلب الحجم المرتبط بقوة الاتجاه
     trend_strength_multiplier = 1 + (adx / 120)
     
     return {
@@ -949,7 +951,6 @@ def check_pullback_dynamic_filters(df: pd.DataFrame, mtf_trend: Dict) -> Dict:
     recovery_threshold = recent_low * (1 + (pullback_depth * 0.9))
     
     volume_ma = df['volume'].rolling(20).mean()
-    # [--- تعديل ---] تخفيف متطلب حجم التعافي
     recovery_volume_multiplier = 1.05 + (atr_percent / 110)
     
     return {
@@ -969,7 +970,6 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
     is_momentum_ok = (last_row['rsi'] > 50.5) and (df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2])
 
     adx_ma = df['adx'].rolling(20).mean()
-    # [--- تعديل ---] تخفيض مضاعف ADX ليكون أقل صرامة
     dynamic_adx_threshold = adx_ma.iloc[-1] * 0.75
     
     return {
@@ -979,22 +979,17 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
     }
 
 def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
-    """
-    فلاتر ديناميكية محسنة لاستراتيجية موجات إليوت.
-    """
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
     fib_retracement = get_wave_retracement(df)
     
-    # [--- تعديل ---] توسيع نطاق فيبوناتشي لزيادة المرونة
     fib_min, fib_max = 0.25, 0.85
     fibonacci_valid = (fib_min <= fib_retracement <= fib_max) if fib_retracement >= 0 else False
     
     price_above_ema21 = last_row['close'] > last_row.get('ema21', 0)
     
     volume_ma = df['volume'].rolling(20).mean()
-    # [--- تعديل ---] تخفيف متطلب الحجم
     wave_volume_multiplier = 1.25 + (atr_percent / 60)
     volume_ok = last_row['volume'] > volume_ma.iloc[-1] * wave_volume_multiplier
     
@@ -1021,12 +1016,11 @@ def check_range_reversal_dynamic_filters(df: pd.DataFrame) -> Dict:
 
     return {'adx_ok': adx_ok, 'rsi_ok': rsi_ok}
 
-# --- General Filters ---
 def add_news_filter() -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
     now = datetime.now(timezone.utc)
     for hour, minute in news_hours:
-        if now.hour == hour and abs(now.minute - minute) <= 15: # Reduced window for 5m
+        if now.hour == hour and abs(now.minute - minute) <= 15:
             return False
     return True
 
@@ -1054,7 +1048,6 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
-    # [--- تعديل ---] تخفيض الحد الأدنى للسماح بالتداول في الأسواق الهادئة
     ATR_PERCENT_MIN = 0.25
     ATR_PERCENT_MAX = 3.2
     
@@ -1067,7 +1060,6 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     return True
 
-# --- Dynamic Stop Loss & Take Profit (remains the same) ---
 def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     last = df.iloc[-1]
     atr_value = last.get('atr', 0)
@@ -1110,9 +1102,8 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
 
 def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str) -> tuple:
     risk_amount = entry_price - stop_loss
-    if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.025) # Default for 5m
+    if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.025)
 
-    # Risk-Reward Ratios adjusted for 5m timeframe (Scalping)
     if strategy_name == "BB_Stoch_Strategy": rr1, rr2 = 1.8, 3.0
     elif strategy_name == "MACD_EMA_Strategy": rr1, rr2 = 1.6, 2.8
     elif strategy_name == "EMA_RSI_Strategy": rr1, rr2 = 1.7, 3.0
@@ -1130,7 +1121,6 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     
     return target1, target2
 
-# --- استراتيجيات التداول المعدلة ---
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200: return False
@@ -1147,9 +1137,6 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     return True
 
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    """
-    استراتيجية بولينجر + ستوكاستيك المحسنة.
-    """
     symbol_name = getattr(df, 'name', 'Unknown')
     
     if len(df) < 50:
@@ -1183,7 +1170,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     
     atr_percent = last.get('atr_percent', 0)
     volume_ma = df['volume'].rolling(20).mean().iloc[-1]
-    volume_multiplier = 1.0 + (atr_percent / 120) # [--- تعديل ---]
+    volume_multiplier = 1.0 + (atr_percent / 120)
     
     if last['volume'] < volume_ma * volume_multiplier:
         return False
@@ -1218,9 +1205,6 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     return True
 
 def check_pullback_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    """
-    استراتيجية الارتداد المحسنة.
-    """
     symbol_name = getattr(df, 'name', 'Unknown')
     
     if len(df) < 200:
@@ -1255,7 +1239,6 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
         return False
     
     volume_ma = df['volume'].rolling(20).mean()
-    # [--- تعديل ---]
     recovery_volume_multiplier = 1.05 + (atr_percent / 110)
     
     if last['volume'] <= volume_ma.iloc[-1] * recovery_volume_multiplier:
@@ -1305,9 +1288,6 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> b
     return True
 
 def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    """
-    استراتيجية الانعكاس النطاقي المحسنة.
-    """
     symbol_name = getattr(df, 'name', 'Unknown')
     
     if len(df) < 50:
@@ -1351,12 +1331,8 @@ def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
         return False
     
     return True
-# --- نهاية الاستراتيجيات ---
 
 def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
-    """
-    Formats the quantity to the correct precision required by Binance API for a specific symbol.
-    """
     try:
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
@@ -1380,9 +1356,6 @@ def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float, 
                                       exchange_info_map: dict = exchange_info_map, logger=logger) -> Optional[Decimal]:
-    """
-    ضبط الكمية حسب LOT_SIZE مع معالجة أفضل للأخطاء.
-    """
     from decimal import Decimal, ROUND_DOWN
     
     try:
@@ -1428,9 +1401,6 @@ def calculate_position_size_fixed(symbol: str, entry_price: float,
                                   available_balance: float, is_real: bool,
                                   exchange_info_map: dict = exchange_info_map, logger=logger,
                                   override_amount: Optional[float] = None) -> Optional[Decimal]:
-    """
-    حساب حجم الصفقة مع معالجة صحيحة لجميع الحالات (النسخة الأساسية الآمنة).
-    """
     if override_amount is not None:
         desired_usdt_amount = override_amount
     elif not is_real:
@@ -1512,9 +1482,6 @@ def calculate_dynamic_position_size(
     exchange_info_map: dict, 
     logger
 ) -> Optional[Decimal]:
-    """
-    حساب حجم الصفقة بشكل ديناميكي بناءً على جودة الإشارة وتقلب السوق.
-    """
     if not is_real:
         base_usdt_amount = PAPER_TRADE_FIXED_AMOUNT_USDT
     else:
@@ -1623,7 +1590,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, mtf_t
             send_enhanced_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\n`{e}`", force=True)
         except Exception as e:
             logger.error(f"❌ [Real Trade] CRITICAL ERROR creating real trade for {symbol}: {e}", exc_info=True)
-    else: # Paper Trading
+    else:
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, float(quantity_dec), signal_details)
         send_trade_open_notification(
             symbol, strategy_name, entry_price, stop_loss_price, target_price_1, target_price_2,
@@ -1657,7 +1624,6 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         if conn: conn.rollback()
 
 
-# --- HTML Templates (remain unchanged) ---
 DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
@@ -2500,9 +2466,6 @@ function updateEquityChart(equityData) {
 """
 
 def manage_intelligent_trailing_stop(signal: Dict, current_price: float, df: pd.DataFrame) -> Optional[Dict]:
-    """
-    إدارة وقف الخسارة المتحرك الذكي.
-    """
     details = signal.get('signal_details', {})
     if not isinstance(details, dict): details = {}
 
@@ -2532,7 +2495,6 @@ def manage_intelligent_trailing_stop(signal: Dict, current_price: float, df: pd.
 
     return None
 
-# --- مسارات Flask ---
 @app.route('/')
 def dashboard(): return render_template_string(DASHBOARD_TEMPLATE)
 @app.route('/backtest')
@@ -3193,9 +3155,8 @@ def update_balance_loop():
         except Exception as e: logger.error(f"❌ [Balance Loop] Error: {e}", exc_info=True)
         time.sleep(60 * 5)
 
-# --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.1.1 (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.1.2 (5-Min Scalper) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -3203,8 +3164,10 @@ if __name__ == '__main__':
         logger.info("✅ [Binance] API connection successful.")
     except Exception as e:
         logger.critical(f"❌ [Binance] API connection failed: {e}"); exit(1)
+    
     get_exchange_info_map()
     validated_symbols_to_scan = get_validated_symbols()
+    
     if not validated_symbols_to_scan:
         logger.critical("❌ No valid symbols to scan. Exiting."); exit(1)
     
