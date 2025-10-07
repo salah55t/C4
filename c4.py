@@ -1,8 +1,8 @@
-# ملف c4_5min_v34_1_0.py - نسخة V34.1.0 (إصلاح مرونة الفلاتر)
+# ملف c4_5min_v34_1_1.py - نسخة V34.1.1 (إصلاح مرونة الفلاتر للسوق الهادئ)
 # --- وصف التعديلات:
 # 1. [إصلاح فلتر فيبوناتشي] تم توسيع نطاق قبول تصحيح فيبوناتشي بشكل كبير ليكون أكثر مرونة ويقلل من حالات الرفض.
 # 2. [إصلاح فلتر التقلب] تم تخفيض الحد الأدنى لتقلب السوق (ATR) للسماح للبوت بالعثور على صفقات في ظروف السوق الأقل تقلباً.
-# 3. [تحسينات طفيفة] تم إجراء تعديلات طفيفة على فلاتر ADX لتكون أقل صرامة.
+# 3. [تحسينات طفيفة] تم إجراء تعديلات طفيفة على فلاتر ADX وفلاتر الحجم لتكون أقل صرامة.
 # 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام.
 # 5. [تحديثات متقدمة] تم دمج نظام نقاط الجودة، حجم الصفقات الديناميكي، ووقف الخسارة المتحرك الذكي.
 
@@ -49,7 +49,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV34.1.0_5min')
+logger = logging.getLogger('CryptoBotV34.1.1_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -884,7 +884,8 @@ def check_bb_stoch_dynamic_filters(df: pd.DataFrame) -> Dict:
     stoch_threshold = 23 if atr_percent > 1.5 else 18 # Adjusted for 5m
     
     volume_ma = df['volume'].rolling(20).mean()
-    volume_multiplier = 1.0 + (atr_percent / 100)
+    # [--- تعديل ---] تخفيف طفيف لمتطلب الحجم
+    volume_multiplier = 1.0 + (atr_percent / 120) 
     
     return {
         'bb_width_ok': bb_width.iloc[-1] > dynamic_bb_threshold.iloc[-1],
@@ -896,15 +897,16 @@ def check_macd_ema_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    # --- تحسين: تم تخفيض الحد الأدنى لـ ADX ليكون أقل صرامة ---
-    default_adx_thresh = 18 if atr_percent > 1.5 else 15 #
+    # [--- تعديل ---] تخفيض الحد الأدنى لـ ADX ليكون أقل صرامة
+    default_adx_thresh = 17 if atr_percent > 1.5 else 14
     adx_threshold = default_adx_thresh
     
     volume_ma = df['volume'].rolling(20).mean()
-    volatility_adjusted_volume = volume_ma * (1 + atr_percent / 75)
+    # [--- تعديل ---] تخفيف متطلب الحجم المرتبط بالتقلب
+    volatility_adjusted_volume = volume_ma * (1 + atr_percent / 100)
     
     macd_momentum = df['macd_hist'].diff()
-    momentum_threshold = macd_momentum.rolling(10).std() * 0.3
+    momentum_threshold = macd_momentum.rolling(10).std() * 0.25
     
     return {
         'adx_ok': last_row['adx'] > adx_threshold,
@@ -922,10 +924,12 @@ def check_ema_rsi_dynamic_filters(df: pd.DataFrame) -> Dict:
         rsi_lower, rsi_upper = 48, 72
     
     ema_spread = (df['ema9'] - df['ema21']) / df['ema21'].replace(0, 1e-9)
-    dynamic_ema_threshold = ema_spread.rolling(20).std() * 1.7
+    # [--- تعديل ---] تقليل مضاعف حساسية تباعد المتوسطات
+    dynamic_ema_threshold = ema_spread.rolling(20).std() * 1.5
     
     volume_ma = df['volume'].rolling(20).mean()
-    trend_strength_multiplier = 1 + (adx / 100)
+    # [--- تعديل ---] تخفيف متطلب الحجم المرتبط بقوة الاتجاه
+    trend_strength_multiplier = 1 + (adx / 120)
     
     return {
         'rsi_ok': rsi_lower < last_row['rsi'] < rsi_upper,
@@ -945,7 +949,8 @@ def check_pullback_dynamic_filters(df: pd.DataFrame, mtf_trend: Dict) -> Dict:
     recovery_threshold = recent_low * (1 + (pullback_depth * 0.9))
     
     volume_ma = df['volume'].rolling(20).mean()
-    recovery_volume_multiplier = 1.1 + (atr_percent / 100)
+    # [--- تعديل ---] تخفيف متطلب حجم التعافي
+    recovery_volume_multiplier = 1.05 + (atr_percent / 110)
     
     return {
         'recovery_ok': last_row['close'] > recovery_threshold,
@@ -961,11 +966,11 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
     dynamic_vol_min = volatility_ma.iloc[-1] - (volatility_std.iloc[-1] * 1.5)
     dynamic_vol_max = volatility_ma.iloc[-1] + (volatility_std.iloc[-1] * 1.5)
     
-    is_momentum_ok = (last_row['rsi'] > 51) and (df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2])
+    is_momentum_ok = (last_row['rsi'] > 50.5) and (df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2])
 
     adx_ma = df['adx'].rolling(20).mean()
-    # --- تحسين: تم تخفيض مضاعف ADX ليكون أقل صرامة ---
-    dynamic_adx_threshold = adx_ma.iloc[-1] * 0.80
+    # [--- تعديل ---] تخفيض مضاعف ADX ليكون أقل صرامة
+    dynamic_adx_threshold = adx_ma.iloc[-1] * 0.75
     
     return {
         'volatility_ok': dynamic_vol_min <= atr_percent.iloc[-1] <= dynamic_vol_max,
@@ -973,45 +978,35 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
         'adx_ok': last_row['adx'] > dynamic_adx_threshold,
     }
 
-# ===== FIXED: Elliott Wave Dynamic Filters =====
 def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
     """
     فلاتر ديناميكية محسنة لاستراتيجية موجات إليوت.
-    
-    التحسينات:
-    1. معالجة صحيحة لحالات فشل حساب فيبوناتشي
-    2. نطاق فيبوناتشي أكثر واقعية (0.382 - 0.786)
-    3. التحقق من قوة الارتداد بعد التصحيح
     """
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    # حساب تصحيح فيبوناتشي
     fib_retracement = get_wave_retracement(df)
     
-    # نطاق فيبوناتشي الكلاسيكي للموجات (أكثر واقعية)
-    # 0.382, 0.5, 0.618 هي المستويات الأكثر شيوعاً
-    fib_min, fib_max = 0.30, 0.80
+    # [--- تعديل ---] توسيع نطاق فيبوناتشي لزيادة المرونة
+    fib_min, fib_max = 0.25, 0.85
     fibonacci_valid = (fib_min <= fib_retracement <= fib_max) if fib_retracement >= 0 else False
     
-    # التحقق من قوة الارتداد: السعر يجب أن يكون فوق EMA21
     price_above_ema21 = last_row['close'] > last_row.get('ema21', 0)
     
-    # الحجم يجب أن يكون أعلى من المتوسط بنسبة تتناسب مع التقلب
     volume_ma = df['volume'].rolling(20).mean()
-    wave_volume_multiplier = 1.3 + (atr_percent / 50)
+    # [--- تعديل ---] تخفيف متطلب الحجم
+    wave_volume_multiplier = 1.25 + (atr_percent / 60)
     volume_ok = last_row['volume'] > volume_ma.iloc[-1] * wave_volume_multiplier
     
-    # زخم MACD يجب أن يكون إيجابياً ومتزايداً
     macd_momentum = df['macd_hist'].rolling(5).mean()
-    momentum_threshold = macd_momentum.rolling(20).std().iloc[-1] * 0.3
+    momentum_threshold = macd_momentum.rolling(20).std().iloc[-1] * 0.25
     momentum_ok = macd_momentum.iloc[-1] > momentum_threshold
     
     return {
         'fibonacci_ok': fibonacci_valid and price_above_ema21,
         'volume_ok': volume_ok,
         'momentum_ok': momentum_ok,
-        'fib_value': fib_retracement  # للتشخيص
+        'fib_value': fib_retracement
     }
 
 def check_range_reversal_dynamic_filters(df: pd.DataFrame) -> Dict:
@@ -1059,8 +1054,8 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
-    # --- إصلاح: تم تخفيض الحد الأدنى للسماح بالتداول في الأسواق الهادئة ---
-    ATR_PERCENT_MIN = 0.35
+    # [--- تعديل ---] تخفيض الحد الأدنى للسماح بالتداول في الأسواق الهادئة
+    ATR_PERCENT_MIN = 0.25
     ATR_PERCENT_MAX = 3.2
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
@@ -1151,18 +1146,9 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
         
     return True
 
-# ===== FIXED: BB_Stoch Strategy =====
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
     استراتيجية بولينجر + ستوكاستيك المحسنة.
-    
-    الشروط:
-    1. السعر فوق EMA50 (اتجاه صاعد)
-    2. السعر لمس أو اقترب من الحد السفلي لبولينجر
-    3. Stochastic في منطقة التشبع البيعي وبدأ في الارتفاع
-    4. عرض البولينجر كافٍ (تقلب معقول)
-    5. حجم التداول مناسب
-    6. RSI ليس في منطقة التشبع الشرائي المفرط
     """
     symbol_name = getattr(df, 'name', 'Unknown')
     
@@ -1172,21 +1158,16 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 1. الاتجاه العام صاعد
     if not (last['close'] > last['ema50']):
         return False
     
-    # 2. لمس الحد السفلي لبولينجر
     bb_touch = (df['low'].tail(3) <= df['bb_lower'].tail(3) * 1.003).any()
-    
     if not bb_touch:
         return False
     
-    # 3. السعر الحالي فوق الحد السفلي (بدأ في الارتداد)
     if last['close'] <= last['bb_lower']:
         return False
     
-    # 4. Stochastic: كان منخفضاً وبدأ في الارتفاع
     stoch_was_low = prev['stoch_k'] < 30
     stoch_rising = last['stoch_k'] > prev['stoch_k']
     stoch_not_overbought = last['stoch_k'] < 70
@@ -1194,27 +1175,23 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     if not (stoch_was_low and stoch_rising and stoch_not_overbought):
         return False
     
-    # 5. عرض البولينجر كافٍ (التقلب مناسب للدخول)
     bb_width = last.get('bb_width', 0)
     bb_width_ma = df['bb_width'].rolling(20).mean().iloc[-1]
     
     if bb_width < bb_width_ma * 0.8:
         return False
     
-    # 6. الحجم مناسب
     atr_percent = last.get('atr_percent', 0)
     volume_ma = df['volume'].rolling(20).mean().iloc[-1]
-    volume_multiplier = 1.0 + (atr_percent / 100)
+    volume_multiplier = 1.0 + (atr_percent / 120) # [--- تعديل ---]
     
     if last['volume'] < volume_ma * volume_multiplier:
         return False
     
-    # 7. RSI ليس مرتفعاً جداً (لتجنب الدخول في قمة)
     if last.get('rsi', 50) > 70:
         return False
     
     return True
-
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
@@ -1240,17 +1217,9 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
         
     return True
 
-# ===== FIXED: Pullback Strategy =====
 def check_pullback_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
     استراتيجية الارتداد المحسنة.
-    
-    الشروط:
-    1. اتجاه صاعد واضح (EMA21 > EMA50 > EMA200)
-    2. حدث تصحيح (pullback) لمس أو اخترق EMA21
-    3. التصحيح عميق بما يكفي (على الأقل 1.5% من القمة الأخيرة)
-    4. السعر بدأ في التعافي (إغلاق فوق EMA21 أو EMA9)
-    5. حجم التداول يزداد عند التعافي
     """
     symbol_name = getattr(df, 'name', 'Unknown')
     
@@ -1259,46 +1228,39 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
 
     last = df.iloc[-1]
     
-    # 1. التحقق من الاتجاه الصاعد
     if not (last['ema21'] > last['ema50'] > last['ema200']):
         return False
     
-    # 2. التحقق من حدوث تصحيح (لمس EMA21 في آخر 3-5 شمعات)
     recent_lows = df['low'].tail(5)
     recent_ema21 = df['ema21'].tail(5)
     
-    pullback_occurred = (recent_lows <= recent_ema21 * 1.002).any()  # هامش 0.2%
+    pullback_occurred = (recent_lows <= recent_ema21 * 1.002).any()
     
     if not pullback_occurred:
         return False
     
-    # 3. التحقق من عمق التصحيح
-    # نحسب القمة الأخيرة في آخر 10 شمعات
     recent_high = df['high'].tail(10).max()
     pullback_depth = (recent_high - recent_lows.min()) / recent_high
     
     atr_percent = last.get('atr_percent', 0)
-    min_pullback_depth = 0.015 if atr_percent > 2.0 else 0.010  # 1-1.5%
+    min_pullback_depth = 0.015 if atr_percent > 2.0 else 0.010
     
     if pullback_depth < min_pullback_depth:
         return False
     
-    # 4. التحقق من التعافي
-    # السعر يجب أن يكون فوق EMA9 أو يغلق فوق أدنى سعر في التصحيح
-    recovery_price = recent_lows.min() * 1.003  # 0.3% فوق أدنى سعر
+    recovery_price = recent_lows.min() * 1.003
     price_recovering = last['close'] > recovery_price or last['close'] > last['ema9']
     
     if not price_recovering:
         return False
     
-    # 5. التحقق من الحجم
     volume_ma = df['volume'].rolling(20).mean()
-    recovery_volume_multiplier = 1.1 + (atr_percent / 100)
+    # [--- تعديل ---]
+    recovery_volume_multiplier = 1.05 + (atr_percent / 110)
     
     if last['volume'] <= volume_ma.iloc[-1] * recovery_volume_multiplier:
         return False
     
-    # 6. التأكد من أن MTF يدعم الاتجاه الصاعد
     if mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish':
         return False
     
@@ -1342,17 +1304,9 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> b
         
     return True
 
-# ===== FIXED: Range Reversal Strategy =====
 def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
     استراتيجية الانعكاس النطاقي المحسنة.
-    
-    الشروط:
-    1. ADX < 23 (سوق جانبي)
-    2. السعر لمس أو اخترق الحد السفلي لبولينجر
-    3. حدث ارتداد قوي (إغلاق فوق BB السفلي بنسبة معينة)
-    4. RSI في منطقة التشبع البيعي (< 35)
-    5. زيادة في الحجم عند الارتداد
     """
     symbol_name = getattr(df, 'name', 'Unknown')
     
@@ -1362,46 +1316,37 @@ def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 1. التحقق من أن السوق جانبي (ADX منخفض)
     if last.get('adx', 99) >= 23:
         return False
     
-    # 2. التحقق من لمس الحد السفلي
     bb_lower = last.get('bb_lower', 0)
     if bb_lower == 0:
         return False
     
-    # السعر لمس أو اخترق الحد السفلي في الشمعة السابقة
     price_touched_lower = prev['low'] <= prev.get('bb_lower', float('inf'))
     
     if not price_touched_lower:
         return False
     
-    # 3. التحقق من قوة الارتداد
-    # الإغلاق الحالي يجب أن يكون فوق BB السفلي بنسبة معينة
-    rebound_threshold = bb_lower * 1.002  # 0.2% فوق الحد السفلي
+    rebound_threshold = bb_lower * 1.002
     strong_rebound = last['close'] > rebound_threshold
     
     if not strong_rebound:
         return False
     
-    # 4. RSI في منطقة التشبع البيعي
     rsi = last.get('rsi', 50)
     atr_percent = last.get('atr_percent', 0)
     
-    # نطاق RSI يتغير حسب التقلب
     rsi_threshold = 35 if atr_percent < 2.5 else 38
     
     if rsi >= rsi_threshold:
         return False
     
-    # 5. زيادة الحجم عند الارتداد (مقارنة بالشمعة السابقة)
     volume_increase = last['volume'] > prev['volume'] * 1.1
     
     if not volume_increase:
         return False
     
-    # 6. فلتر إضافي: التأكد من عدم وجود اتجاه هابط قوي في الإطار الزمني الأعلى
     if mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish':
         return False
     
@@ -1425,18 +1370,14 @@ def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
         
         step_size = Decimal(lot_size_filter['stepSize'])
         
-        # Quantize the number to the step size (e.g., 0.01 for 2 decimal places)
-        # This correctly formats the number by rounding down to the nearest valid trade amount.
         formatted_quantity = quantity.quantize(step_size, rounding=ROUND_DOWN)
 
-        # Return as a plain string without scientific notation or extra trailing zeros.
         return f"{formatted_quantity.normalize()}"
         
     except Exception as e:
         logger.error(f"❌ [{symbol}] Error formatting quantity: {e}. Returning raw value string.")
         return str(quantity)
 
-# ===== FIXED: Position Size Calculation =====
 def adjust_quantity_to_lot_size(symbol: str, quantity: float, 
                                       exchange_info_map: dict = exchange_info_map, logger=logger) -> Optional[Decimal]:
     """
@@ -1463,20 +1404,16 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float,
         
         quantity_dec = Decimal(str(quantity))
         
-        # التحقق من min_qty
         if quantity_dec < min_qty:
             logger.warning(f"[{symbol}] الكمية {quantity_dec} أقل من minQty {min_qty}")
             return None
         
-        # التحقق من max_qty
         if quantity_dec > max_qty:
             logger.warning(f"[{symbol}] الكمية {quantity_dec} أكبر من maxQty {max_qty}")
             quantity_dec = max_qty
         
-        # ضبط الكمية حسب step_size
         adjusted_quantity = (quantity_dec // step_size) * step_size
         
-        # التحقق النهائي
         if adjusted_quantity < min_qty:
             logger.warning(f"[{symbol}] الكمية المعدلة {adjusted_quantity} أقل من minQty {min_qty}")
             return None
@@ -1565,7 +1502,6 @@ def calculate_position_size_fixed(symbol: str, entry_price: float,
         logger.error(f"❌ [{symbol}] خطأ حرج في حساب حجم الصفقة: {e}", exc_info=True)
         return None
 
-# ===== UPDATED: Position Size Calculation (Now Dynamic) =====
 def calculate_dynamic_position_size(
     symbol: str, 
     entry_price: float, 
@@ -1579,27 +1515,23 @@ def calculate_dynamic_position_size(
     """
     حساب حجم الصفقة بشكل ديناميكي بناءً على جودة الإشارة وتقلب السوق.
     """
-    # 1. تحديد مبلغ الأساس بناءً على وضع التداول
     if not is_real:
         base_usdt_amount = PAPER_TRADE_FIXED_AMOUNT_USDT
     else:
         base_usdt_amount = random.uniform(FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT)
 
-    # 2. تعديل المبلغ بناءً على جودة الإشارة
     quality_modifier = 1.0
     if quality_score > 85:
-        quality_modifier = 1.25  # زيادة 25% للفرص الممتازة
+        quality_modifier = 1.25
     elif quality_score < 70:
-        quality_modifier = 0.85   # تقليل 15% للفرص الأضعف
+        quality_modifier = 0.85
 
-    # 3. تعديل المبلغ بناءً على تقلب السوق (مخاطرة عكسية)
     volatility_modifier = 1.0
     if atr_percent > 3.0:
-        volatility_modifier = 0.80  # تقليل 20% في الأسواق شديدة التقلب
+        volatility_modifier = 0.80
     elif atr_percent < 0.8:
-        volatility_modifier = 1.15  # زيادة 15% في الأسواق الهادئة
+        volatility_modifier = 1.15
 
-    # 4. حساب المبلغ النهائي المطلوب
     desired_usdt_amount = base_usdt_amount * quality_modifier * volatility_modifier
     
     logger.info(
@@ -1608,7 +1540,6 @@ def calculate_dynamic_position_size(
         f"Final Desired=${desired_usdt_amount:.2f}"
     )
     
-    # 5. استخدام دالة حساب الحجم الآمنة مع المبلغ الديناميكي الجديد
     return calculate_position_size_fixed(
         symbol, entry_price, available_balance, is_real, 
         exchange_info_map, logger, override_amount=desired_usdt_amount
@@ -2568,35 +2499,27 @@ function updateEquityChart(equityData) {
 </html>
 """
 
-# ===== NEW: Intelligent Trailing Stop-Loss Logic =====
 def manage_intelligent_trailing_stop(signal: Dict, current_price: float, df: pd.DataFrame) -> Optional[Dict]:
     """
     إدارة وقف الخسارة المتحرك الذكي.
-    يتم تفعيله بعد الهدف الأول ويتبع السعر بناءً على قيعان الشموع أو ATR.
     """
     details = signal.get('signal_details', {})
     if not isinstance(details, dict): details = {}
 
-    # يجب أن يكون الهدف الأول قد تحقق لتفعيل الوقف المتحرك
     if not details.get('tp1_done'):
         return None
 
     current_stop_loss = float(signal['stop_loss'])
     new_potential_sl = None
 
-    # الطريقة الأولى: استخدام قيعان الشموع الأخيرة (أكثر استقراراً)
     try:
-        # ابحث عن أدنى قاع في آخر 3 شمعات (باستثناء الشمعة الحالية)
         recent_low = df['low'].iloc[-4:-1].min()
-        
-        # أضف هامش أمان صغير
         potential_sl_swing = recent_low * Decimal('0.998')
         
         if potential_sl_swing > current_stop_loss:
             new_potential_sl = float(potential_sl_swing)
             
     except Exception:
-        # الطريقة الثانية: استخدام ATR (كخيار احتياطي)
         atr_value = df.iloc[-1].get('atr', 0)
         if atr_value > 0:
             potential_sl_atr = current_price - (atr_value * 2.5)
@@ -2680,7 +2603,6 @@ def update_settings():
         logger.error(f"Error updating settings: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-# (Rest of the Flask routes and main script logic remains the same as previous version)
 @app.route('/api/health')
 def api_health():
     try:
@@ -2892,7 +2814,6 @@ def api_run_backtest():
         logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
         return jsonify({"error": "An internal error occurred."}), 500
 
-# (The rest of the main script, including backtesting, loops, and startup logic, remains the same)
 def backtest_strategy(strategy_name, symbol, days=90):
     logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days on {SIGNAL_GENERATION_TIMEFRAME}.")
     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
@@ -3202,7 +3123,6 @@ def trade_management_loop():
                     
                     continue
 
-                # NEW: Intelligent Trailing Stop Logic
                 if details.get('tp1_done'):
                     recent_df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days=2)
                     if recent_df is not None and not recent_df.empty:
@@ -3271,11 +3191,11 @@ def update_balance_loop():
     while True:
         try: update_balance()
         except Exception as e: logger.error(f"❌ [Balance Loop] Error: {e}", exc_info=True)
-        time.sleep(60 * 5) # تحديث الرصيد كل 5 دقائق
+        time.sleep(60 * 5)
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.1.0 (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.1.1 (5-Min Scalper) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -3288,7 +3208,6 @@ if __name__ == '__main__':
     if not validated_symbols_to_scan:
         logger.critical("❌ No valid symbols to scan. Exiting."); exit(1)
     
-    # Load initial data
     load_open_signals_to_cache()
     load_notifications_to_cache()
     load_settings_from_redis()
@@ -3299,7 +3218,6 @@ if __name__ == '__main__':
 
     logger.info("Initial data fetch complete.")
     
-    # Start background threads
     start_websocket()
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=trade_management_loop, daemon=True).start()
@@ -3307,6 +3225,5 @@ if __name__ == '__main__':
     Thread(target=update_balance_loop, daemon=True).start()
     start_periodic_reports()
     
-    # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
