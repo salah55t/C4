@@ -1437,14 +1437,15 @@ def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
         return str(quantity)
 
 # ===== FIXED: Position Size Calculation =====
-def adjust_quantity_to_lot_size(symbol: str, quantity: float, 
-                                      exchange_info_map: dict = exchange_info_map, logger=logger) -> Optional[Decimal]:
+def adjust_quantity_to_lot_size(symbol: str, quantity: float, logger=logger) -> Optional[Decimal]:
     """
     ضبط الكمية حسب LOT_SIZE مع معالجة أفضل للأخطاء.
+    تم إصلاح المشكلة عن طريق الوصول مباشرة إلى المتغير العام exchange_info_map.
     """
     from decimal import Decimal, ROUND_DOWN
     
     try:
+        # الوصول المباشر إلى المتغير العام لتجنب البيانات القديمة
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
             logger.error(f"[{symbol}] معلومات الرمز غير موجودة في exchange_info_map")
@@ -1489,10 +1490,11 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float,
 
 def calculate_position_size_fixed(symbol: str, entry_price: float, 
                                   available_balance: float, is_real: bool,
-                                  exchange_info_map: dict = exchange_info_map, logger=logger,
+                                  logger=logger,
                                   override_amount: Optional[float] = None) -> Optional[Decimal]:
     """
     حساب حجم الصفقة مع معالجة صحيحة لجميع الحالات (النسخة الأساسية الآمنة).
+    تم إصلاح المشكلة عن طريق الوصول مباشرة إلى المتغير العام exchange_info_map.
     """
     if override_amount is not None:
         desired_usdt_amount = override_amount
@@ -1517,13 +1519,15 @@ def calculate_position_size_fixed(symbol: str, entry_price: float,
             return None
 
         initial_quantity = dec_desired_amount / dec_entry
-        adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
+        adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity), logger=logger)
 
         if adjusted_quantity is None or adjusted_quantity <= 0:
             logger.warning(f"[{symbol}] فشل ضبط الكمية حسب LOT_SIZE")
             return None
 
         notional_value = adjusted_quantity * dec_entry
+        
+        # الوصول المباشر إلى المتغير العام
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
             min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
@@ -1541,7 +1545,7 @@ def calculate_position_size_fixed(symbol: str, entry_price: float,
                         return None
                         
                     new_quantity = required_notional / dec_entry
-                    adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(new_quantity))
+                    adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(new_quantity), logger=logger)
 
                     if adjusted_quantity is None or adjusted_quantity <= 0:
                         logger.error(f"[{symbol}] فشل ضبط الكمية لتلبية min_notional")
@@ -1573,7 +1577,6 @@ def calculate_dynamic_position_size(
     is_real: bool,
     quality_score: int,
     atr_percent: float,
-    exchange_info_map: dict, 
     logger
 ) -> Optional[Decimal]:
     """
@@ -1611,7 +1614,7 @@ def calculate_dynamic_position_size(
     # 5. استخدام دالة حساب الحجم الآمنة مع المبلغ الديناميكي الجديد
     return calculate_position_size_fixed(
         symbol, entry_price, available_balance, is_real, 
-        exchange_info_map, logger, override_amount=desired_usdt_amount
+        logger, override_amount=desired_usdt_amount
     )
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, mtf_trend: Dict):
@@ -1655,7 +1658,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, mtf_t
         current_real_balance = usdt_balance
 
     quantity_dec = calculate_dynamic_position_size(
-        symbol, entry_price, current_real_balance, is_real, quality_score, atr_percent, exchange_info_map, logger
+        symbol, entry_price, current_real_balance, is_real, quality_score, atr_percent, logger
     )
 
     if quantity_dec is None or quantity_dec <= 0:
@@ -3122,7 +3125,7 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
                 quantity_to_sell = available_on_exchange
                 
                 if quantity_to_sell > 0:
-                    adjusted_quantity_to_sell = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
+                    adjusted_quantity_to_sell = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell), logger=logger)
                     
                     if adjusted_quantity_to_sell and adjusted_quantity_to_sell > 0:
                         formatted_sell_quantity = get_formatted_quantity(symbol, adjusted_quantity_to_sell)
@@ -3183,7 +3186,7 @@ def trade_management_loop():
                 if tp1 and not details.get('tp1_done') and remaining_qty > 0 and current_price >= tp1:
                     part_qty_to_close = initial_quantity * 0.5
                     if signal.get('is_real_trade'):
-                        adjusted_qty = adjust_quantity_to_lot_size(symbol, part_qty_to_close)
+                        adjusted_qty = adjust_quantity_to_lot_size(symbol, part_qty_to_close, logger=logger)
                         if adjusted_qty and adjusted_qty > 0:
                              try:
                                 formatted_sell_quantity = get_formatted_quantity(symbol, adjusted_qty)
