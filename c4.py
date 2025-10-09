@@ -3230,3 +3230,446 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
+
+
+# ===== ADVANCED SMART MARKET STRUCTURE FILTER V2 & ULTRA STRATEGIES =====
+import numpy as np
+from scipy.signal import argrelextrema
+from typing import Dict, List, Tuple, Optional
+
+def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
+    if len(df) < 50:
+        return {"structure_type": "unknown", "strength": 0}
+
+    highs = df['high'].values
+    lows = df['low'].values
+
+    swing_high_indices = argrelextrema(highs, np.greater, order=5)[0]
+    swing_low_indices = argrelextrema(lows, np.less, order=5)[0]
+
+    structure_data = {
+        "swing_highs": [(int(i), float(highs[i])) for i in swing_high_indices[-5:]] if len(swing_high_indices) >= 2 else [],
+        "swing_lows": [(int(i), float(lows[i])) for i in swing_low_indices[-5:]] if len(swing_low_indices) >= 2 else [],
+        "structure_type": "ranging",
+        "strength": 0,
+        "bos_detected": False,
+        "choch_detected": False
+    }
+
+    # Determine trend from recent swings
+    if len(swing_high_indices) >= 3 and len(swing_low_indices) >= 3:
+        recent_highs = highs[swing_high_indices[-3:]]
+        recent_lows = lows[swing_low_indices[-3:]]
+        highs_rising = all(recent_highs[i] < recent_highs[i+1] for i in range(len(recent_highs)-1))
+        lows_rising = all(recent_lows[i] < recent_lows[i+1] for i in range(len(recent_lows)-1))
+        highs_falling = all(recent_highs[i] > recent_highs[i+1] for i in range(len(recent_highs)-1))
+        lows_falling = all(recent_lows[i] > recent_lows[i+1] for i in range(len(recent_lows)-1))
+
+        if highs_rising and lows_rising:
+            structure_data["structure_type"] = "bullish"
+            structure_data["strength"] = 85
+        elif highs_falling and lows_falling:
+            structure_data["structure_type"] = "bearish"
+            structure_data["strength"] = 15
+        elif highs_rising and not lows_falling:
+            structure_data["structure_type"] = "weak_bullish"
+            structure_data["strength"] = 60
+        elif highs_falling and not lows_rising:
+            structure_data["structure_type"] = "weak_bearish"
+            structure_data["strength"] = 40
+        else:
+            structure_data["structure_type"] = "ranging"
+            structure_data["strength"] = 50
+
+    # BOS / CHoCH detection
+    if len(swing_high_indices) >= 2 and len(swing_low_indices) >= 2:
+        last_swing_high = highs[swing_high_indices[-2]]
+        last_swing_low = lows[swing_low_indices[-2]]
+        current_price = float(df['close'].iloc[-1])
+
+        if current_price > last_swing_high * 1.002:
+            structure_data["bos_detected"] = True
+            structure_data["bos_direction"] = "bullish"
+
+        if structure_data["structure_type"] in ["bullish", "weak_bullish"]:
+            if current_price < last_swing_low * 0.998:
+                structure_data["choch_detected"] = True
+                structure_data["choch_direction"] = "bearish"
+
+    return structure_data
+
+
+def find_price_clusters(prices: np.ndarray, tolerance: float = 0.003) -> List[float]:
+    clusters = []
+    if len(prices) == 0:
+        return clusters
+    sorted_prices = np.sort(prices)
+    i = 0
+    while i < len(sorted_prices):
+        base = sorted_prices[i]
+        cluster = [base]
+        j = i + 1
+        while j < len(sorted_prices):
+            if abs(sorted_prices[j] - base) / (base if base != 0 else 1e-9) <= tolerance:
+                cluster.append(sorted_prices[j])
+                j += 1
+            else:
+                break
+        if len(cluster) >= 2:
+            clusters.append(float(np.mean(cluster)))
+        i = j if j > i else i + 1
+    return clusters
+
+
+def analyze_liquidity_zones(df: pd.DataFrame) -> Dict[str, any]:
+    recent_highs = df['high'].tail(20)
+    recent_lows = df['low'].tail(20)
+    current_price = float(df['close'].iloc[-1])
+
+    high_clusters = find_price_clusters(recent_highs.values)
+    low_clusters = find_price_clusters(recent_lows.values)
+
+    danger_zone = False
+    reason = ""
+
+    for cluster in high_clusters:
+        if abs(current_price - cluster) / current_price < 0.005:
+            danger_zone = True
+            reason = f"Too close to liquidity zone at {cluster:.6f}"
+            break
+
+    return {
+        "safe_to_trade": not danger_zone,
+        "reason": reason if danger_zone else "Clear liquidity path",
+        "high_clusters": high_clusters,
+        "low_clusters": low_clusters
+    }
+
+
+def detect_bearish_divergence(df: pd.DataFrame) -> bool:
+    if len(df) < 20:
+        return False
+    recent_df = df.tail(20)
+    highs = recent_df['high'].values
+    rsi_values = recent_df['rsi'].values
+    high_indices = argrelextrema(highs, np.greater, order=3)[0]
+    if len(high_indices) >= 2:
+        last_high_idx = high_indices[-1]
+        prev_high_idx = high_indices[-2]
+        price_higher_high = highs[last_high_idx] > highs[prev_high_idx]
+        rsi_lower_high = rsi_values[last_high_idx] < rsi_values[prev_high_idx]
+        if price_higher_high and rsi_lower_high:
+            return True
+    return False
+
+
+def apply_advanced_market_structure_filter(df: pd.DataFrame, symbol: str) -> Tuple[bool, Optional[str]]:
+    if len(df) < 50:
+        return False, "Insufficient data for structure analysis"
+
+    structure = detect_market_structure(df)
+
+    if structure["strength"] < 55:
+        return False, f"Weak structure (strength: {structure['strength']})"
+
+    if structure.get("choch_detected") and structure.get("choch_direction") == "bearish":
+        return False, "Bearish CHoCH detected - potential trend reversal"
+
+    liquidity_analysis = analyze_liquidity_zones(df)
+    if not liquidity_analysis["safe_to_trade"]:
+        return False, liquidity_analysis["reason"]
+
+    last = df.iloc[-1]
+    ema_alignment = (last['ema9'] > last['ema21'] > last['ema50'])
+    if not ema_alignment:
+        return False, "EMAs not properly aligned"
+
+    if detect_bearish_divergence(df):
+        return False, "Bearish divergence detected"
+
+    return True, None
+
+
+# ===== ADVANCED TRADING STRATEGIES V2 - ULTRA SMART =====
+
+def find_bullish_order_block(df: pd.DataFrame) -> Optional[Dict]:
+    recent = df.tail(40)
+    for i in range(len(recent) - 3, 0, -1):
+        current = recent.iloc[i]
+        next_candle = recent.iloc[i + 1]
+        is_bearish = current['close'] < current['open']
+        next_is_strong_bullish = (
+            next_candle['close'] > next_candle['open'] and
+            (next_candle['close'] - next_candle['open']) > (current['high'] - current['low']) * 1.5
+        )
+        if is_bearish and next_is_strong_bullish:
+            return {"high": float(current['high']), "low": float(current['low']), "index": int(i)}
+    return None
+
+
+def detect_fair_value_gap(df: pd.DataFrame) -> Optional[Dict]:
+    if len(df) < 3:
+        return None
+    recent = df.tail(8)
+    for i in range(len(recent) - 2):
+        c1 = recent.iloc[i]; c2 = recent.iloc[i+1]; c3 = recent.iloc[i+2]
+        bullish_gap = c3['low'] > c1['high']
+        bearish_gap = c3['high'] < c1['low']
+        if bullish_gap:
+            gap_size = c3['low'] - c1['high']
+            if gap_size / c2['close'] > 0.002:
+                return {"type": "bullish", "upper": float(c3['low']), "lower": float(c1['high']), "size": float(gap_size)}
+        if bearish_gap:
+            gap_size = c1['low'] - c3['high']
+            if gap_size / c2['close'] > 0.002:
+                return {"type": "bearish", "upper": float(c1['low']), "lower": float(c3['high']), "size": float(gap_size)}
+    return None
+
+
+def check_smart_money_concept_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    if len(df) < 100:
+        return False
+    last = df.iloc[-1]
+    structure = detect_market_structure(df)
+    if not structure.get("bos_detected") or structure.get("bos_direction") != "bullish":
+        return False
+    order_block = find_bullish_order_block(df)
+    if not order_block:
+        return False
+    fvg = detect_fair_value_gap(df)
+    if fvg and fvg["type"] == "bearish":
+        return False
+    volume_confirmation = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.5
+    if not volume_confirmation:
+        return False
+    if mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish':
+        return False
+    rsi_ok = 50 < last['rsi'] < 75
+    macd_ok = last['macd_hist'] > 0 and last['macd_hist'] > df['macd_hist'].iloc[-2]
+    return rsi_ok and macd_ok
+
+
+def calculate_obv(df: pd.DataFrame) -> pd.Series:
+    obv = [0]
+    for i in range(1, len(df)):
+        if df['close'].iloc[i] > df['close'].iloc[i-1]:
+            obv.append(obv[-1] + df['volume'].iloc[i])
+        elif df['close'].iloc[i] < df['close'].iloc[i-1]:
+            obv.append(obv[-1] - df['volume'].iloc[i])
+        else:
+            obv.append(obv[-1])
+    return pd.Series(obv, index=df.index)
+
+
+def find_support_level(df: pd.DataFrame) -> Optional[float]:
+    lows = df['low'].values
+    low_clusters = find_price_clusters(lows, tolerance=0.005)
+    if low_clusters:
+        return min(low_clusters)
+    return None
+
+
+def detect_bullish_divergence(df: pd.DataFrame) -> bool:
+    if len(df) < 15:
+        return False
+    lows = df['low'].values
+    rsi_values = df['rsi'].values
+    low_indices = argrelextrema(lows, np.less, order=3)[0]
+    if len(low_indices) >= 2:
+        last_low_idx = low_indices[-1]; prev_low_idx = low_indices[-2]
+        price_lower_low = lows[last_low_idx] < lows[prev_low_idx]
+        rsi_higher_low = rsi_values[last_low_idx] > rsi_values[prev_low_idx]
+        if price_lower_low and rsi_higher_low:
+            return True
+    return False
+
+
+def check_institutional_accumulation_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    if len(df) < 50:
+        return False
+    last = df.iloc[-1]
+    recent_20 = df.tail(20)
+    price_range = (recent_20['high'].max() - recent_20['low'].min()) / recent_20['close'].mean()
+    if price_range > 0.04:
+        return False
+    volume_trend = df['volume'].tail(20)
+    volume_increasing = volume_trend.iloc[-10:].mean() > volume_trend.iloc[-20:-10].mean() * 1.2
+    if not volume_increasing:
+        return False
+    obv = calculate_obv(df.tail(30))
+    obv_rising = obv.iloc[-5:].is_monotonic_increasing
+    if not obv_rising:
+        return False
+    bb_width = last.get('bb_width', 0)
+    bb_width_ma = df['bb_width'].rolling(50).mean().iloc[-1]
+    if bb_width >= bb_width_ma * 0.8:
+        return False
+    near_support = (
+        abs(last['close'] - last['ema21']) / last['close'] < 0.01 or
+        abs(last['close'] - last['ema50']) / last['close'] < 0.015
+    )
+    if not near_support:
+        return False
+    macd_turning = (last['macd_hist'] > df['macd_hist'].iloc[-2] and df['macd_hist'].iloc[-2] < df['macd_hist'].iloc[-3])
+    htf_ok = mtf_trend.get('15m') != 'bearish' or mtf_trend.get('1h') != 'bearish'
+    return macd_turning and htf_ok
+
+
+def check_wyckoff_spring_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    if len(df) < 50:
+        return False
+    last = df.iloc[-1]
+    support_level = find_support_level(df.tail(30))
+    if not support_level:
+        return False
+    spring_detected = False
+    recent_10 = df.tail(10)
+    for i in range(len(recent_10) - 1):
+        candle = recent_10.iloc[i]
+        if candle['low'] < support_level * 0.997 and candle['close'] > support_level:
+            spring_detected = True
+            break
+    if not spring_detected:
+        return False
+    spring_volume = recent_10['volume'].max()
+    avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+    if spring_volume < avg_volume * 1.3:
+        return False
+    if last['close'] <= support_level:
+        return False
+    positive_divergence = detect_bullish_divergence(df.tail(20))
+    macd_cross = (last['macd'] > last['macd_signal'] and df['macd'].iloc[-2] <= df['macd_signal'].iloc[-2])
+    return positive_divergence or macd_cross
+
+
+def check_turtle_soup_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    if len(df) < 30:
+        return False
+    last = df.iloc[-1]
+    recent_20 = df.tail(20)
+    day_20_high = recent_20['high'].iloc[:-1].max()
+    false_breakout = (recent_20['high'].iloc[-2] > day_20_high and last['close'] < day_20_high)
+    if not false_breakout:
+        return False
+    breakout_volume = recent_20['volume'].iloc[-2]
+    avg_volume = df['volume'].rolling(20).mean().iloc[-3]
+    if breakout_volume >= avg_volume * 1.2:
+        return False
+    is_engulfing = (
+        last['close'] < last['open'] and
+        last['open'] >= recent_20['high'].iloc[-2] and
+        last['close'] < recent_20['low'].iloc[-2]
+    )
+    rsi_overbought = last['rsi'] > 70
+    macd_weakening = last['macd_hist'] < df['macd_hist'].iloc[-2]
+    if mtf_trend.get('15m') == 'bullish' and mtf_trend.get('1h') == 'bullish':
+        return False
+    return is_engulfing and (rsi_overbought or macd_weakening)
+
+
+ULTRA_ADVANCED_STRATEGIES = {
+    "Smart_Money_Concept": {
+        "name": "مفهوم المال الذكي (SMC)",
+        "check_function": check_smart_money_concept_strategy,
+        "enabled": True,
+        "best_regime": ['trending', 'mixed'],
+        "risk_level": 'medium'
+    },
+    "Institutional_Accumulation": {
+        "name": "تراكم المؤسسات",
+        "check_function": check_institutional_accumulation_strategy,
+        "enabled": True,
+        "best_regime": ['ranging', 'mixed'],
+        "risk_level": 'low'
+    },
+    "Wyckoff_Spring": {
+        "name": "نابض ويكوف",
+        "check_function": check_wyckoff_spring_strategy,
+        "enabled": True,
+        "best_regime": ['ranging', 'mixed'],
+        "risk_level": 'medium'
+    },
+    "Turtle_Soup": {
+        "name": "حساء السلحفاة",
+        "check_function": check_turtle_soup_strategy,
+        "enabled": True,
+        "best_regime": ['trending', 'mixed'],
+        "risk_level": 'high'
+    }
+}
+
+
+# ===== ADVANCED SIGNAL QUALITY SCORING SYSTEM =====
+def calculate_advanced_signal_quality(
+    df: pd.DataFrame,
+    mtf_trend: Dict,
+    strategy_name: str,
+    structure_data: Dict
+) -> int:
+    score = 0
+    last = df.iloc[-1]
+
+    # 1. Multi-timeframe trend (35)
+    mtf_score = 0
+    if mtf_trend.get('5m') == 'bullish': mtf_score += 10
+    if mtf_trend.get('15m') == 'bullish': mtf_score += 12
+    elif mtf_trend.get('15m') == 'sideways': mtf_score += 6
+    if mtf_trend.get('1h') == 'bullish': mtf_score += 13
+    score += mtf_score  # up to 35
+
+    # 2. Structure quality (20)
+    struct_score = 0
+    stype = structure_data.get('structure_type', 'unknown')
+    strength = structure_data.get('strength', 50)
+    if stype == 'bullish': struct_score += 20
+    elif stype == 'weak_bullish': struct_score += 12
+    elif stype == 'ranging': struct_score += 8
+    elif stype == 'weak_bearish': struct_score += 5
+    score += min(20, struct_score)
+
+    # 3. Indicator strength (20)
+    ind_score = 0
+    if 55 < last.get('rsi', 50) < 72: ind_score += 8
+    if last.get('macd_hist', 0) > 0 and df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2]: ind_score += 7
+    ema_spread = (last.get('ema21', 0) - last.get('ema50', 0)) / (last.get('close', 1) or 1) * 100
+    if ema_spread > 0.3: ind_score += 5
+    score += min(20, ind_score)
+
+    # 4. Volume & momentum (15)
+    vol_score = 0
+    volume_ma20 = df['volume'].rolling(20).mean().iloc[-1]
+    if last['volume'] > volume_ma20 * 1.5: vol_score += 8
+    if last.get('adx', 0) > 20: vol_score += 7
+    score += min(15, vol_score)
+
+    # 5. Price action patterns & liquidity (10)
+    pa_score = 0
+    if structure_data.get('bos_detected'): pa_score += 5
+    liq = analyze_liquidity_zones(df)
+    if liq['safe_to_trade']: pa_score += 5
+    score += min(10, pa_score)
+
+    # 6. Volatility adjustment (max -5/+5)
+    atrp = last.get('atr_percent', 0)
+    if atrp > 3.5: score -= 3
+    elif atrp < 0.6: score += 2
+
+    # cap and normalize
+    final = max(0, min(100, int(score)))
+    return final
+
+
+
+# Merge ultra strategies into existing strategies dictionary if they exist
+try:
+    ENHANCED_STRATEGIES.update(ULTRA_ADVANCED_STRATEGIES)
+    try:
+        STRATEGY_NAMES.update({k: v['name'] for k, v in ULTRA_ADVANCED_STRATEGIES.items()})
+    except NameError:
+        pass
+except NameError:
+    # ENHANCED_STRATEGIES not defined in this module - that's fine
+    pass
+
+# End of injected advanced market-structure & strategies block.
