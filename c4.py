@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V35.0 (استراتيجية الزخم الذكي الثورية)
+# ملف c4.py - نسخة V36.0 (استراتيجية الزخم الذكي المتوازنة)
 # --- وصف التعديلات:
-# 1. [تنظيف الكود] تم إزالة جميع استراتيجيات التداول القديمة.
-# 2. [استراتيجية ثورية] تم إضافة وتكامل "استراتيجية الزخم الذكي الثورية V2.0" بشكل كامل.
-# 3. [تكامل ذكي] تم تحديث دوال حساب وقف الخسارة وجني الأرباح لتستخدم المنطق المتقدم الخاص بالاستراتيجية الجديدة.
-# 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام.
+# 1. [استراتيجية متوازنة] تم استبدال استراتيجية الزخم السابقة بالنسخة V3.0 الجديدة، المصممة لتكون أكثر مرونة وتوليد إشارات أكثر.
+# 2. [شروط مخففة] تم تخفيف شروط الزخم والتأكيدات للحصول على فرص تداول أكثر في مختلف ظروف السوق.
+# 3. [تكامل ذكي] تم تحديث دوال حساب وقف الخسارة وجني الأرباح لتستخدم المنطق المتوازن الخاص بالاستراتيجية الجديدة.
+# 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكل السوق المتقدم والفلاتر الأخرى.
 
 import time
 import os
@@ -44,11 +44,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v35_5min_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v36_5min_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV35.0_5min')
+logger = logging.getLogger('CryptoBotV36.0_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -631,55 +631,13 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- VWAP ---
     df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
     
+    # Add columns needed for new strategy to avoid errors
+    df_calc['momentum_score'] = 0
+    df_calc['entry_type'] = ''
+    df_calc['confirmations'] = 0
+    df_calc['final_quality'] = 0
+
     return df_calc
-
-# ===== NEW: Signal Quality Scoring System =====
-def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
-    """
-    يحسب نقاط جودة للإشارة (من 0 إلى 100) بناءً على عدة عوامل فنية.
-    هذا يسمح للبوت بالتركيز فقط على أفضل الفرص.
-    """
-    score = 0
-    last = df.iloc[-1]
-    
-    # 1. قوة الاتجاه (Trend Strength) - (Max 25 points)
-    ema_spread = (last['ema21'] - last['ema50']) / last['close'] * 100
-    if ema_spread > 0.5:
-        score += 25  # اتجاه قوي جداً
-    elif ema_spread > 0.2:
-        score += 15  # اتجاه جيد
-    
-    # 2. تأكيد الحجم (Volume Confirmation) - (Max 20 points)
-    volume_ma20 = df['volume'].rolling(20).mean().iloc[-1]
-    if last['volume'] > volume_ma20 * 2:
-        score += 20  # حجم استثنائي
-    elif last['volume'] > volume_ma20 * 1.5:
-        score += 10  # حجم جيد
-        
-    # 3. زخم المؤشرات (Indicator Momentum) - (Max 25 points)
-    # RSI
-    if 60 < last['rsi'] < 70:
-        score += 15  # زخم RSI مثالي
-    elif last['rsi'] > 55:
-        score += 5
-    # MACD
-    if last['macd_hist'] > 0 and df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2]:
-        score += 10 # زخم MACD إيجابي ومتزايد
-        
-    # 4. التوافق الزمني (Multi-Timeframe Alignment) - (Max 20 points)
-    if mtf_trend.get('15m') == 'bullish':
-        score += 10
-    if mtf_trend.get('1h') == 'bullish':
-        score += 10
-        
-    # 5. التقلب (Volatility) - (Max 10 points)
-    atr_percent = last.get('atr_percent', 0)
-    if 1.0 < atr_percent < 2.5:
-        score += 10  # تقلب مثالي للتداول
-    elif 0.7 < atr_percent < 3.5:
-        score += 5
-
-    return min(100, int(score))
 
 # --- Data Loading & Settings Management ---
 def load_open_signals_to_cache():
@@ -811,570 +769,190 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     return True
     
-# ===== ULTRA SMART MOMENTUM STRATEGY V2.0 - REVOLUTIONARY =====
-# استراتيجية الزخم الذكي الثورية - نسخة محسّنة بشكل جذري
+# ===== BALANCED ULTRA SMART MOMENTUM STRATEGY V3.0 =====
+# استراتيجية الزخم الذكي المتوازنة - تعطي إشارات كثيرة وعالية الجودة
 
-# ===== 1. نظام Multi-Layer Momentum Analysis =====
-def calculate_momentum_layers(df: pd.DataFrame) -> Dict[str, float]:
+# ===== 1. تحليل الزخم المبسط والفعال =====
+def calculate_momentum_score(df: pd.DataFrame) -> float:
     """
-    تحليل الزخم على عدة مستويات:
-    - Price Momentum (زخم السعر)
-    - Volume Momentum (زخم الحجم)
-    - Volatility Momentum (زخم التقلب)
-    - Trend Momentum (زخم الاتجاه)
+    حساب نقاط الزخم بطريقة مبسطة وفعالة (0-100)
     """
-    
+    if len(df) < 20: return 0
     last = df.iloc[-1]
-    
-    # 1. Price Momentum Score (0-100)
-    price_mom = 0
-    
-    # Rate of Change على فترات مختلفة
-    roc_3 = ((df['close'].iloc[-1] - df['close'].iloc[-4]) / df['close'].iloc[-4]) * 100 if len(df) > 3 else 0
-    roc_7 = ((df['close'].iloc[-1] - df['close'].iloc[-8]) / df['close'].iloc[-8]) * 100 if len(df) > 7 else 0
-    roc_14 = ((df['close'].iloc[-1] - df['close'].iloc[-15]) / df['close'].iloc[-15]) * 100 if len(df) > 14 else 0
-    
-    if roc_3 > 2: price_mom += 35
-    elif roc_3 > 1: price_mom += 25
-    elif roc_3 > 0.5: price_mom += 15
-    
-    if roc_7 > 3: price_mom += 25
-    elif roc_7 > 1.5: price_mom += 15
-    
-    if roc_14 > 5: price_mom += 40
-    elif roc_14 > 2: price_mom += 20
-    
-    # 2. Volume Momentum Score (0-100)
-    vol_mom = 0
-    
-    vol_ma_short = df['volume'].rolling(5).mean().iloc[-1]
-    vol_ma_long = df['volume'].rolling(20).mean().iloc[-1]
-    
-    vol_ratio = last['volume'] / vol_ma_long if vol_ma_long > 0 else 0
-    vol_trend = vol_ma_short / vol_ma_long if vol_ma_long > 0 else 0
-    
-    if vol_ratio > 2.5: vol_mom += 40
-    elif vol_ratio > 2.0: vol_mom += 30
-    elif vol_ratio > 1.5: vol_mom += 20
-    
-    if vol_trend > 1.3: vol_mom += 30
-    elif vol_trend > 1.1: vol_mom += 20
-    
-    # Volume Acceleration (تسارع الحجم)
-    if len(df) > 8:
-        vol_recent_mean = df['volume'].iloc[-3:].mean()
-        vol_past_mean = df['volume'].iloc[-8:-5].mean()
-        vol_acceleration = (vol_recent_mean - vol_past_mean) / vol_past_mean if vol_past_mean > 0 else 0
-        if vol_acceleration > 0.5: vol_mom += 30
-        elif vol_acceleration > 0.2: vol_mom += 15
-    
-    # 3. Volatility Momentum (استقرار مع زخم)
-    vol_mom_score = 0
-    atr_current = last.get('atr', 0)
-    atr_ma = df['atr'].rolling(14).mean().iloc[-1]
-    
-    # نريد تقلب معتدل مع زيادة تدريجية
-    if atr_ma > 0:
-        if 0.8 < atr_current / atr_ma < 1.3:
-            vol_mom_score = 100
-        elif 0.6 < atr_current / atr_ma < 1.5:
-            vol_mom_score = 70
-        elif atr_current / atr_ma < 2.0:
-            vol_mom_score = 40
-    
-    # 4. Trend Momentum Score
-    trend_mom = 0
-    
-    # EMA Spread Analysis
-    ema_spreads = [
-        (last['ema9'] - last['ema21']) / last['close'] * 100,
-        (last['ema21'] - last['ema50']) / last['close'] * 100,
-        (last['ema50'] - last['ema200']) / last['close'] * 100
-    ]
-    
-    if all(s > 0.3 for s in ema_spreads):
-        trend_mom = 100
-    elif all(s > 0.1 for s in ema_spreads):
-        trend_mom = 75
-    elif all(s > 0 for s in ema_spreads):
-        trend_mom = 50
-    
-    return {
-        'price_momentum': min(100, price_mom),
-        'volume_momentum': min(100, vol_mom),
-        'volatility_momentum': vol_mom_score,
-        'trend_momentum': trend_mom,
-        'composite_score': (price_mom + vol_mom + vol_mom_score + trend_mom) / 4
-    }
+    score = 0
+    # 1. قوة الاتجاه (30 نقطة)
+    if last['ema9'] > last['ema21']:
+        score += 15
+        if last['ema21'] > last['ema50']:
+            score += 10
+            if last['ema50'] > last['ema200']:
+                score += 5
+    # 2. زخم السعر (25 نقطة)
+    if len(df) > 5:
+        roc_5 = ((last['close'] - df['close'].iloc[-6]) / df['close'].iloc[-6]) * 100 if df['close'].iloc[-6] > 0 else 0
+        if roc_5 > 0.5: score += 10
+        if roc_5 > 1.0: score += 10
+        if roc_5 > 2.0: score += 5
+    # 3. زخم الحجم (25 نقطة)
+    vol_ma = df['volume'].rolling(20).mean().iloc[-1]
+    if vol_ma > 0:
+        if last['volume'] > vol_ma * 1.2: score += 10
+        if last['volume'] > vol_ma * 1.5: score += 10
+        if last['volume'] > vol_ma * 2.0: score += 5
+    # 4. المؤشرات الفنية (20 نقطة)
+    if last['macd_hist'] > 0:
+        score += 7
+        if last['macd_hist'] > df['macd_hist'].iloc[-2]: score += 6
+    if 45 < last['rsi'] < 75: score += 7
+    return min(100, score)
 
-# ===== 2. Smart Entry Zones Detection =====
-def detect_optimal_entry_zones(df: pd.DataFrame) -> Dict[str, any]:
+# ===== 2. اكتشاف أنماط الدخول =====
+def detect_entry_pattern(df: pd.DataFrame) -> Dict[str, any]:
     """
-    اكتشاف مناطق الدخول المثالية بدقة عالية
+    اكتشاف أنماط الدخول المختلفة بمرونة
     """
-    
-    last = df.iloc[-1]
-    
-    # 1. Pullback Entry Zone
-    pullback_detected = False
-    pullback_quality = 0
-    
-    recent_10 = df.tail(10)
-    recent_high = recent_10['high'].max()
-    
-    # التحقق من ارتداد صحي (ليس عميقاً جداً)
-    pullback_depth = (recent_high - last['close']) / recent_high if recent_high > 0 else 0
-    
-    if 0.01 < pullback_depth < 0.04:
-        pullback_detected = True
-        # السعر يرتد من منطقة دعم (EMA21)
-        if abs(last['close'] - last['ema21']) / last['close'] < 0.01:
-            pullback_quality = 90
-        elif abs(last['close'] - last['ema21']) / last['close'] < 0.02:
-            pullback_quality = 70
-    
-    # 2. Breakout Entry Zone
-    breakout_detected = False
-    breakout_strength = 0
-    
-    # البحث عن كسر مقاومة قريبة
-    resistance_levels = find_resistance_levels(df.tail(50))
-    
-    for resistance in resistance_levels:
-        if 0.998 < last['close'] / resistance < 1.003:
-            breakout_detected = True
-            # قياس قوة الكسر بناءً على الحجم
-            if last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 2:
-                breakout_strength = 95
-            elif last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.5:
-                breakout_strength = 75
-            break
-    
-    # 3. Momentum Continuation Entry
-    continuation_detected = False
-    continuation_score = 0
-    
-    # التحقق من استمرار الزخم بعد تماسك قصير
-    price_consolidation = (recent_10['high'].max() - recent_10['low'].min()) / recent_10['close'].mean() if recent_10['close'].mean() > 0 else 0
-    
-    if price_consolidation < 0.02:  # تماسك ضيق
-        # والآن السعر يكسر للأعلى
-        if last['close'] > recent_10['high'].iloc[-3:-1].max():
-            continuation_detected = True
-            continuation_score = 85
-    
-    return {
-        'pullback': {'detected': pullback_detected, 'quality': pullback_quality},
-        'breakout': {'detected': breakout_detected, 'strength': breakout_strength},
-        'continuation': {'detected': continuation_detected, 'score': continuation_score},
-        'best_entry_type': get_best_entry_type(pullback_quality, breakout_strength, continuation_score)
-    }
+    if len(df) < 15: return {'detected': False, 'type': None, 'quality': 0}
+    last = df.iloc[-1]; prev = df.iloc[-2]
+    # 1. نمط الاختراق البسيط (Breakout)
+    recent_high = df['high'].tail(10).iloc[:-1].max()
+    if last['high'] > recent_high * 1.001:
+        vol_strong = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.3
+        return {'detected': True, 'type': 'breakout', 'quality': 85 if vol_strong else 70}
+    # 2. نمط الارتداد (Pullback)
+    recent_high_5 = df['high'].tail(5).max()
+    pullback_size = (recent_high_5 - last['close']) / recent_high_5 if recent_high_5 > 0 else 0
+    if 0.005 < pullback_size < 0.035:
+        near_ema = abs(last['close'] - last['ema21']) / last['close'] < 0.015
+        if near_ema or last['close'] > last['ema9']:
+            return {'detected': True, 'type': 'pullback', 'quality': 80 if near_ema else 65}
+    # 3. نمط الاستمرار (Continuation)
+    if last['close'] > prev['close'] and prev['close'] > df['close'].iloc[-3]:
+        if last['close'] > last['ema9'] > last['ema21']:
+            return {'detected': True, 'type': 'continuation', 'quality': 75}
+    # 4. نمط التقاطع الذهبي السريع (Quick Golden Cross)
+    if prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']:
+        return {'detected': True, 'type': 'golden_cross', 'quality': 80}
+    return {'detected': False, 'type': None, 'quality': 0}
 
-def find_resistance_levels(df: pd.DataFrame) -> list:
-    """إيجاد مستويات المقاومة القريبة"""
-    highs = df['high'].values
-    resistance_indices = argrelextrema(highs, np.greater, order=3)[0]
-    
-    if len(resistance_indices) == 0:
-        return []
-    
-    resistance_prices = [highs[i] for i in resistance_indices[-3:]]
-    return resistance_prices
-
-def get_best_entry_type(pullback_q, breakout_s, continuation_s):
-    """تحديد أفضل نوع دخول"""
-    scores = {
-        'pullback': pullback_q,
-        'breakout': breakout_s,
-        'continuation': continuation_s
-    }
-    return max(scores, key=scores.get) if max(scores.values()) > 0 else None
-
-# ===== 3. Advanced Confirmation System =====
-def get_multi_indicator_confirmation(df: pd.DataFrame) -> Tuple[bool, int]:
-    """
-    نظام تأكيد متعدد المؤشرات - يجب تحقيق 7 من 10 شروط على الأقل
-    """
-    
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    confirmations = []
-    
-    # 1. MACD Confirmation
-    macd_bullish = (
-        last['macd'] > 0 and 
-        last['macd_hist'] > 0 and 
-        last['macd_hist'] > prev['macd_hist']
-    )
-    confirmations.append(macd_bullish)
-    
-    # 2. RSI Momentum Zone
-    rsi_good = 50 < last['rsi'] < 75
-    confirmations.append(rsi_good)
-    
-    # 3. ADX Trend Strength
-    adx_strong = last['adx'] > 20 and last['adx'] > df['adx'].iloc[-5:].mean()
-    confirmations.append(adx_strong)
-    
-    # 4. Volume Confirmation
-    vol_confirm = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
-    confirmations.append(vol_confirm)
-    
-    # 5. EMA Alignment
-    ema_aligned = last['ema9'] > last['ema21'] > last['ema50']
-    confirmations.append(ema_aligned)
-    
-    # 6. Price Above VWAP
-    above_vwap = last['close'] > last.get('vwap', last['close'])
-    confirmations.append(above_vwap)
-    
-    # 7. Stochastic Not Overbought
-    stoch_ok = last.get('stoch_k', 50) < 85
-    confirmations.append(stoch_ok)
-    
-    # 8. Bollinger Band Position
-    bb_range = last['bb_upper'] - last['bb_lower']
-    bb_position = (last['close'] - last['bb_lower']) / bb_range if bb_range > 0 else 0.5
-    bb_good = 0.4 < bb_position < 0.8
-    confirmations.append(bb_good)
-    
-    # 9. Price Action (شموع صاعدة)
-    bullish_candles = sum(1 for i in range(-3, 0) if df['close'].iloc[i] > df['open'].iloc[i])
-    price_action_good = bullish_candles >= 2
-    confirmations.append(price_action_good)
-    
-    # 10. No Bearish Divergence
-    no_divergence = not detect_bearish_divergence_quick(df)
-    confirmations.append(no_divergence)
-    
-    confirmation_count = sum(confirmations)
-    confirmation_percentage = (confirmation_count / len(confirmations)) * 100
-    
-    return (confirmation_count >= 7, int(confirmation_percentage))
-
-def detect_bearish_divergence_quick(df: pd.DataFrame) -> bool:
-    """اكتشاف سريع لل Divergence الهابط"""
-    if len(df) < 15:
-        return False
-    
-    recent = df.tail(15)
-    highs = recent['high'].values
-    rsi_values = recent['rsi'].values
-    
-    high_indices = argrelextrema(highs, np.greater, order=2)[0]
-    
-    if len(high_indices) >= 2:
-        last_high_idx = high_indices[-1]
-        prev_high_idx = high_indices[-2]
-        
-        price_higher = highs[last_high_idx] > highs[prev_high_idx]
-        rsi_lower = rsi_values[last_high_idx] < rsi_values[prev_high_idx]
-        
-        return price_higher and rsi_lower
-    
-    return False
-
-# ===== 4. THE MAIN ULTRA SMART MOMENTUM STRATEGY =====
+# ===== 3. الاستراتيجية الرئيسية المتوازنة =====
 def check_ultra_smart_momentum_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    """
-    استراتيجية الزخم الذكي الثورية V2.0
-    
-    المميزات:
-    - تحليل متعدد الطبقات للزخم
-    - اكتشاف ذكي لمناطق الدخول المثالية
-    - نظام تأكيد متقدم
-    - مرونة في الشروط مع الحفاظ على الجودة
-    """
-    
-    if len(df) < 200:
-        return False
-    
-    last = df.iloc[-1]
-    
-    # ===== المرحلة 1: Momentum Analysis =====
-    momentum_layers = calculate_momentum_layers(df)
-    
-    # يجب أن يكون Composite Score أعلى من 60
-    if momentum_layers['composite_score'] < 60:
-        return False
-    
-    # على الأقل 3 من 4 طبقات يجب أن تكون قوية (>60)
-    strong_layers = sum(1 for score in [
-        momentum_layers['price_momentum'],
-        momentum_layers['volume_momentum'],
-        momentum_layers['volatility_momentum'],
-        momentum_layers['trend_momentum']
-    ] if score > 60)
-    
-    if strong_layers < 3:
-        return False
-    
-    # ===== المرحلة 2: Entry Zone Detection =====
-    entry_zones = detect_optimal_entry_zones(df)
-    
-    # يجب اكتشاف على الأقل نوع واحد من مناطق الدخول
-    has_valid_entry = (
-        entry_zones['pullback']['detected'] or
-        entry_zones['breakout']['detected'] or
-        entry_zones['continuation']['detected']
-    )
-    
-    if not has_valid_entry:
-        return False
-    
-    # ===== المرحلة 3: Multi-Timeframe Alignment =====
-    # مرونة أكثر: نقبل إذا كان 5m صاعد و 15m ليس هابطاً
-    mtf_ok = (
-        mtf_trend.get('5m') == 'bullish' and
-        mtf_trend.get('15m') != 'bearish'
-    )
-    
-    if not mtf_ok:
-        return False
-    
-    # ===== المرحلة 4: Confirmation System =====
-    is_confirmed, confirmation_score = get_multi_indicator_confirmation(df)
-    
-    # نقبل إذا كان التأكيد 70% أو أكثر
-    if confirmation_score < 70:
-        return False
-    
-    # ===== المرحلة 5: Risk Management Checks =====
-    
-    # 1. التقلب يجب أن يكون ضمن نطاق معقول
+    if len(df) < 50: return False
+    last = df.iloc[-1]; prev = df.iloc[-2]
+    # الفحص 1: الزخم الأساسي
+    momentum_score = calculate_momentum_score(df)
+    if momentum_score < 50: return False
+    # الفحص 2: نمط الدخول
+    entry_pattern = detect_entry_pattern(df)
+    if not entry_pattern['detected']: return False
+    # الفحص 3: التأكيدات الأساسية (5 من 8)
+    confirmations = 0
+    if last['ema9'] > last['ema21']: confirmations += 1
+    if last['macd_hist'] > 0: confirmations += 1
+    if 40 < last['rsi'] < 80: confirmations += 1
+    if last['adx'] > 18: confirmations += 1
+    if last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.1: confirmations += 1
+    if last['close'] > last['ema50']: confirmations += 1
+    if last['close'] > last['open']: confirmations += 1
+    if last['macd_hist'] > prev['macd_hist']: confirmations += 1
+    if confirmations < 5: return False
+    # الفحص 4: الاتجاه العام
+    if mtf_trend.get('5m') == 'bearish': return False
+    # الفحص 5: فحوصات الأمان الأساسية
     atr_percent = last.get('atr_percent', 0)
-    if not (0.5 < atr_percent < 3.5):
-        return False
-    
-    # 2. السعر ليس في منطقة تشبع شرائي حاد
-    if last['rsi'] > 80:
-        return False
-    
-    # 3. السعر أعلى من EMA200 (اتجاه عام صاعد)
-    if last['close'] <= last['ema200']:
-        return False
-    
-    # ===== المرحلة 6: Final Quality Score =====
-    # حساب نقاط الجودة النهائية
-    
-    quality_points = 0
-    
-    # Momentum Score (0-30 points)
-    quality_points += (momentum_layers['composite_score'] / 100) * 30
-    
-    # Entry Zone Quality (0-25 points)
-    best_entry = entry_zones['best_entry_type']
-    if best_entry == 'breakout':
-        quality_points += (entry_zones['breakout']['strength'] / 100) * 25
-    elif best_entry == 'pullback':
-        quality_points += (entry_zones['pullback']['quality'] / 100) * 25
-    elif best_entry == 'continuation':
-        quality_points += (entry_zones['continuation']['score'] / 100) * 25
-    
-    # Confirmation Score (0-25 points)
-    quality_points += (confirmation_score / 100) * 25
-    
-    # Multi-Timeframe Bonus (0-20 points)
-    if mtf_trend.get('15m') == 'bullish':
-        quality_points += 10
-    if mtf_trend.get('1h') == 'bullish':
-        quality_points += 10
-    
-    # يجب أن يكون المجموع النهائي أعلى من 65
-    if quality_points < 65:
-        return False
-    
-    # ===== النجاح! =====
-    # تخزين معلومات إضافية للإشارة
-    # Using .loc for safer assignment on a copy
-    df.loc[df.index[-1], 'momentum_score'] = momentum_layers['composite_score']
-    df.loc[df.index[-1], 'entry_type'] = best_entry
-    df.loc[df.index[-1], 'confirmation_score'] = confirmation_score
-    df.loc[df.index[-1], 'final_quality'] = quality_points
-    
+    if atr_percent > 4.0 or atr_percent < 0.3: return False
+    if last['rsi'] > 85: return False
+    if last['close'] < last['ema200'] * 0.98: return False
+    # تخزين معلومات الإشارة
+    df.loc[df.index[-1], 'momentum_score'] = momentum_score
+    df.loc[df.index[-1], 'entry_type'] = entry_pattern['type']
+    df.loc[df.index[-1], 'confirmations'] = confirmations
     return True
 
-# ===== 5. Enhanced Quality Scoring for Ultra Smart Momentum =====
+# ===== 4. حساب جودة محسّن =====
 def calculate_ultra_momentum_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
-    """
-    حساب نقاط جودة محسّنة خصيصاً لاستراتيجية الزخم الذكي
-    """
-    
-    if len(df) < 200:
-        return 0
-    
-    score = 0
-    last = df.iloc[-1]
-    
-    # 1. Momentum Strength (35 points)
-    momentum_layers = calculate_momentum_layers(df)
-    score += (momentum_layers['composite_score'] / 100) * 35
-    
-    # 2. Entry Quality (25 points)
-    entry_zones = detect_optimal_entry_zones(df)
-    
-    max_entry_score = max(
-        entry_zones['pullback']['quality'],
-        entry_zones['breakout']['strength'],
-        entry_zones['continuation']['score']
-    )
-    score += (max_entry_score / 100) * 25
-    
-    # 3. Confirmation Strength (20 points)
-    _, confirmation_score = get_multi_indicator_confirmation(df)
-    score += (confirmation_score / 100) * 20
-    
-    # 4. Multi-Timeframe Alignment (15 points)
-    if mtf_trend.get('5m') == 'bullish':
-        score += 5
-    if mtf_trend.get('15m') == 'bullish':
-        score += 5
-    if mtf_trend.get('1h') == 'bullish':
-        score += 5
-    
-    # 5. Risk Profile (5 points)
-    atr_percent = last.get('atr_percent', 0)
-    if 1.0 < atr_percent < 2.5:
-        score += 5
-    elif 0.7 < atr_percent < 3.0:
-        score += 3
-    
+    if len(df) < 50: return 0
+    score = 0; last = df.iloc[-1]
+    # 1. نقاط الزخم (40 نقطة)
+    momentum_score = calculate_momentum_score(df)
+    score += (momentum_score / 100) * 40
+    # 2. جودة نمط الدخول (25 نقطة)
+    entry_pattern = detect_entry_pattern(df)
+    if entry_pattern['detected']: score += (entry_pattern['quality'] / 100) * 25
+    # 3. تأكيدات المؤشرات (20 نقطة)
+    confirmations = 0
+    if last['ema9'] > last['ema21']: confirmations += 1
+    if last['macd_hist'] > 0: confirmations += 1
+    if 40 < last['rsi'] < 80: confirmations += 1
+    if last['adx'] > 18: confirmations += 1
+    if last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.1: confirmations += 1
+    if last['close'] > last['ema50']: confirmations += 1
+    if last['close'] > last['open']: confirmations += 1
+    if last['macd_hist'] > df['macd_hist'].iloc[-2]: confirmations += 1
+    score += (confirmations / 8) * 20
+    # 4. توافق الأطر الزمنية (15 نقطة)
+    if mtf_trend.get('5m') == 'bullish': score += 5
+    if mtf_trend.get('15m') == 'bullish': score += 5
+    if mtf_trend.get('1h') in ['bullish', 'sideways']: score += 5
     return min(100, int(score))
 
-# ===== 6. Smart Stop Loss for Ultra Momentum =====
+# ===== 5. وقف الخسارة الذكي =====
 def calculate_ultra_momentum_stop_loss(df: pd.DataFrame, entry_price: float) -> float:
-    """
-    حساب وقف خسارة ذكي مخصص لاستراتيجية الزخم
-    """
-    
+    if len(df) < 10: return entry_price * 0.98
     last = df.iloc[-1]
-    
-    # 1. ATR-based Stop (الأساس)
-    atr_value = last.get('atr', 0)
-    atr_stop = entry_price - (atr_value * 1.8)  # أقرب قليلاً للسماح بتقلبات طبيعية
-    
-    # 2. EMA21-based Stop (دعم ديناميكي)
-    ema21_stop = last['ema21'] * 0.996
-    
-    # 3. Recent Swing Low (دعم هيكلي)
-    recent_lows = df['low'].tail(10)
-    swing_low_stop = recent_lows.min() * 0.998
-    
-    # 4. Volume-weighted Stop (مناطق سيولة)
-    volume_profile_stop = calculate_volume_weighted_support(df)
-    
-    # اختيار الأفضل (الأقرب للسعر مع الحفاظ على المسافة المعقولة)
-    potential_stops = [atr_stop, ema21_stop, swing_low_stop, volume_profile_stop]
-    potential_stops = [s for s in potential_stops if s > 0]
-    
-    if not potential_stops:
-        return entry_price * 0.98  # fallback
-    
-    # نختار الأعلى (الأقرب للسعر) لكن ليس أقرب من 0.8%
-    best_stop = max(potential_stops)
-    min_distance = entry_price * 0.008
-    
-    if entry_price - best_stop < min_distance:
-        best_stop = entry_price - min_distance
-    
-    # ولا أبعد من 2.5%
-    max_distance = entry_price * 0.025
-    if entry_price - best_stop > max_distance:
-        best_stop = entry_price - max_distance
-    
-    return best_stop
+    atr_value = last.get('atr', entry_price * 0.01)
+    atr_stop = entry_price - (atr_value * 2.0)
+    recent_low = df['low'].tail(8).min()
+    swing_stop = recent_low * 0.997
+    ema21_stop = last['ema21'] * 0.995
+    stop_loss = max(atr_stop, swing_stop, ema21_stop)
+    min_distance = entry_price * 0.007
+    max_distance = entry_price * 0.028
+    if entry_price - stop_loss < min_distance: stop_loss = entry_price - min_distance
+    if entry_price - stop_loss > max_distance: stop_loss = entry_price - max_distance
+    return stop_loss
 
-def calculate_volume_weighted_support(df: pd.DataFrame) -> float:
-    """حساب منطقة دعم مرجحة بالحجم"""
-    recent = df.tail(20)
-    
-    # نبحث عن المناطق ذات الحجم العالي
-    high_volume_candles = recent[recent['volume'] > recent['volume'].mean() * 1.5]
-    
-    if len(high_volume_candles) == 0:
-        return 0
-    
-    # نأخذ متوسط أدنى سعر في هذه المناطق
-    weighted_support = high_volume_candles['low'].mean() * 0.998
-    
-    return weighted_support
-
-# ===== 7. Dynamic Take Profit for Ultra Momentum =====
-def calculate_ultra_momentum_take_profit(
-    df: pd.DataFrame, 
-    entry_price: float, 
-    stop_loss: float
-) -> Tuple[float, float]:
-    """
-    حساب أهداف ربح ديناميكية ذكية
-    """
-    
-    last = df.iloc[-1]
+# ===== 6. أهداف الربح الديناميكية =====
+def calculate_ultra_momentum_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float) -> Tuple[float, float]:
     risk = entry_price - stop_loss
-    
-    if risk <= 0:
-        return (entry_price * 1.015, entry_price * 1.03)
-    
-    # 1. تحليل قوة الزخم لتحديد نسبة RR
-    momentum_layers = calculate_momentum_layers(df)
-    composite_momentum = momentum_layers['composite_score']
-    
-    # زخم قوي = أهداف أبعد
-    if composite_momentum > 80:
-        rr1, rr2 = 2.5, 4.5
-    elif composite_momentum > 70:
-        rr1, rr2 = 2.2, 4.0
-    elif composite_momentum > 60:
-        rr1, rr2 = 2.0, 3.5
-    else:
-        rr1, rr2 = 1.8, 3.0
-    
-    # 2. تعديل بناءً على التقلب
-    atr_value = last.get('atr', 0)
-    atr_percent = last.get('atr_percent', 0)
-    
-    # تقلب عالي = نستهدف أرقام أكبر
-    if atr_percent > 2.0:
-        rr1 *= 1.1
-        rr2 *= 1.15
-    
-    # 3. حساب الأهداف
+    if risk <= 0: return (entry_price * 1.015, entry_price * 1.03)
+    last = df.iloc[-1]
+    momentum_score = calculate_momentum_score(df)
+    if momentum_score > 75: rr1, rr2 = 2.2, 3.8
+    elif momentum_score > 65: rr1, rr2 = 2.0, 3.5
+    elif momentum_score > 55: rr1, rr2 = 1.8, 3.2
+    else: rr1, rr2 = 1.7, 3.0
+    atr_percent = last.get('atr_percent', 1.0)
+    if atr_percent > 2.0: rr1 *= 1.1; rr2 *= 1.15
     tp1 = entry_price + (risk * rr1)
     tp2 = entry_price + (risk * rr2)
-    
-    # 4. التحقق من المقاومات القريبة
-    resistance_levels = find_resistance_levels(df.tail(50))
-    
-    # تعديل TP1 إذا كانت هناك مقاومة قريبة جداً
-    for resistance in resistance_levels:
-        if tp1 * 0.995 < resistance < tp1 * 1.005:
-            tp1 = resistance * 0.998  # قبل المقاومة مباشرة
-    
-    # 5. حدود قصوى بناءً على ATR
-    if atr_value > 0:
-      max_tp1 = entry_price + (atr_value * 4.5)
-      max_tp2 = entry_price + (atr_value * 7.5)
-      
-      if tp1 > max_tp1:
-          tp1 = max_tp1
-      if tp2 > max_tp2:
-          tp2 = max_tp2
-    
+    atr_value = last.get('atr', entry_price * 0.01)
+    max_tp1 = entry_price + (atr_value * 5.0)
+    max_tp2 = entry_price + (atr_value * 8.0)
+    if tp1 > max_tp1: tp1 = max_tp1
+    if tp2 > max_tp2: tp2 = max_tp2
     return (tp1, tp2)
 
-# ===== ADVANCED SMART MARKET STRUCTURE FILTER V2 =====
+# ===== 7. دالة مساعدة لاكتشاف الـ Divergence =====
+def detect_bearish_divergence_quick(df: pd.DataFrame) -> bool:
+    if len(df) < 15: return False
+    try:
+        recent = df.tail(15); highs = recent['high'].values; rsi_values = recent['rsi'].values
+        high_indices = argrelextrema(highs, np.greater, order=2)[0]
+        if len(high_indices) >= 2:
+            last_high_idx = high_indices[-1]; prev_high_idx = high_indices[-2]
+            price_higher = highs[last_high_idx] > highs[prev_high_idx]
+            rsi_lower = rsi_values[last_high_idx] < rsi_values[prev_high_idx]
+            return price_higher and rsi_lower
+    except Exception: pass
+    return False
+
+# ===== ADVANCED SMART MARKET STRUCTURE FILTER V2 (KEPT AS REQUESTED) =====
 def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
-    if len(df) < 50:
-        return {"structure_type": "unknown", "strength": 0}
-    highs = df['high'].values
-    lows = df['low'].values
+    if len(df) < 50: return {"structure_type": "unknown", "strength": 0}
+    highs = df['high'].values; lows = df['low'].values
     swing_high_indices = argrelextrema(highs, np.greater, order=5)[0]
     swing_low_indices = argrelextrema(lows, np.less, order=5)[0]
-    structure_data = {
-        "swing_highs": [(i, highs[i]) for i in swing_high_indices[-5:]] if len(swing_high_indices) >= 2 else [],
-        "swing_lows": [(i, lows[i]) for i in swing_low_indices[-5:]] if len(swing_low_indices) >= 2 else [],
-        "structure_type": "ranging", "strength": 0, "bos_detected": False, "choch_detected": False
-    }
+    structure_data = {"swing_highs": [(i, highs[i]) for i in swing_high_indices[-5:]] if len(swing_high_indices) >= 2 else [], "swing_lows": [(i, lows[i]) for i in swing_low_indices[-5:]] if len(swing_low_indices) >= 2 else [], "structure_type": "ranging", "strength": 0, "bos_detected": False, "choch_detected": False}
     if len(swing_high_indices) >= 3 and len(swing_low_indices) >= 3:
         recent_highs = highs[swing_high_indices[-3:]]; recent_lows = lows[swing_low_indices[-3:]]
         highs_rising = all(recent_highs[i] < recent_highs[i+1] for i in range(len(recent_highs)-1))
@@ -1390,8 +968,7 @@ def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
         last_swing_high = highs[swing_high_indices[-2]]; last_swing_low = lows[swing_low_indices[-2]]
         current_price = df['close'].iloc[-1]
         if current_price > last_swing_high * 1.002: structure_data.update({"bos_detected": True, "bos_direction": "bullish"})
-        if structure_data["structure_type"] in ["bullish", "weak_bullish"] and current_price < last_swing_low * 0.998:
-            structure_data.update({"choch_detected": True, "choch_direction": "bearish"})
+        if structure_data["structure_type"] in ["bullish", "weak_bullish"] and current_price < last_swing_low * 0.998: structure_data.update({"choch_detected": True, "choch_direction": "bearish"})
     return structure_data
 
 def apply_advanced_market_structure_filter(df: pd.DataFrame, symbol: str) -> Tuple[bool, Optional[str]]:
@@ -1428,15 +1005,15 @@ def calculate_market_regime(df: pd.DataFrame) -> str:
 # ===== STRATEGY SELECTOR & INTEGRATION =====
 def check_smart_momentum_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
-    استدعاء الاستراتيجية الثورية الجديدة
+    استدعاء الاستراتيجية المتوازنة الجديدة
     """
     return check_ultra_smart_momentum_strategy(df, mtf_trend)
 
 ENHANCED_STRATEGIES = {
     "Smart_Momentum_Strategy": {
-        "name": "زخم ذكي ثوري V2.0",
+        "name": "زخم ذكي متوازن V3.0",
         "check_function": check_smart_momentum_strategy,
-        "enabled": True, "best_regime": ['trending', 'mixed'], "risk_level": 'high'
+        "enabled": True, "best_regime": ['trending', 'mixed', 'ranging'], "risk_level": 'medium'
     }
 }
 STRATEGY_NAMES = {key: info['name'] for key, info in ENHANCED_STRATEGIES.items()}
@@ -1465,94 +1042,66 @@ def calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, strategy_nam
     """
     حساب وقف خسارة ذكي بناءً على الاستراتيجية
     """
-    last = df.iloc[-1]
-    
-    # للاستراتيجية الجديدة
     if strategy_name == "Smart_Momentum_Strategy":
         return calculate_ultra_momentum_stop_loss(df, entry_price)
     
     # Fallback for any other strategies if added later
+    last = df.iloc[-1]
     atr_value = last.get('atr', 0)
     atr_stop = entry_price - (atr_value * 1.8)
     recent_low = df['low'].tail(7).min()
     structure_stop = recent_low * 0.997
-    
     stop_loss = max(atr_stop, structure_stop)
     max_stop_distance = entry_price * 0.025
-    if entry_price - stop_loss > max_stop_distance:
-        stop_loss = entry_price - max_stop_distance
+    if entry_price - stop_loss > max_stop_distance: stop_loss = entry_price - max_stop_distance
     min_stop_distance = entry_price * 0.008
-    if entry_price - stop_loss < min_stop_distance:
-        stop_loss = entry_price - min_stop_distance
-    
+    if entry_price - stop_loss < min_stop_distance: stop_loss = entry_price - min_stop_distance
     return stop_loss
 
 def calculate_smart_take_profit(
-    df: pd.DataFrame, 
-    entry_price: float, 
-    stop_loss: float, 
-    strategy_name: str
+    df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str
 ) -> Tuple[float, float]:
     """
     حساب أهداف ربح ذكية بناءً على الاستراتيجية
     """
     risk_amount = entry_price - stop_loss
-    if risk_amount <= 0: 
-        return (entry_price * 1.015, entry_price * 1.025)
+    if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.025)
     
-    # للاستراتيجية الجديدة
     if strategy_name == "Smart_Momentum_Strategy":
         return calculate_ultra_momentum_take_profit(df, entry_price, stop_loss)
     
     # Fallback for any other strategies
-    target1 = entry_price + (risk_amount * 1.8)
-    target2 = entry_price + (risk_amount * 3.0)
-    return (target1, target2)
+    return (entry_price + (risk_amount * 1.8), entry_price + (risk_amount * 3.0))
 
 # ===== END OF STRATEGY BLOCK =====
 
 
 def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
-    """
-    Formats the quantity to the correct precision required by Binance API for a specific symbol.
-    """
     try:
         symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info:
-            logger.warning(f"[{symbol}] No exchange info for formatting. Using default format.")
-            return f"{quantity.normalize()}"
-
+        if not symbol_info: return f"{quantity.normalize()}"
         lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-        if not lot_size_filter:
-            logger.warning(f"[{symbol}] LOT_SIZE filter not found. Using default format.")
-            return f"{quantity.normalize()}"
-        
+        if not lot_size_filter: return f"{quantity.normalize()}"
         step_size = Decimal(lot_size_filter['stepSize'])
         formatted_quantity = quantity.quantize(step_size, rounding=ROUND_DOWN)
         return f"{formatted_quantity.normalize()}"
-        
     except Exception as e:
-        logger.error(f"❌ [{symbol}] Error formatting quantity: {e}. Returning raw value string.")
+        logger.error(f"❌ [{symbol}] Error formatting quantity: {e}.")
         return str(quantity)
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float, logger=logger) -> Optional[Decimal]:
     from decimal import Decimal
     try:
         symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info:
-            logger.error(f"[{symbol}] معلومات الرمز غير موجودة في exchange_info_map")
-            return None
+        if not symbol_info: return None
         lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-        if not lot_size_filter:
-            return Decimal(str(quantity))
+        if not lot_size_filter: return Decimal(str(quantity))
         step_size = Decimal(lot_size_filter['stepSize'])
         min_qty = Decimal(lot_size_filter['minQty'])
         quantity_dec = Decimal(str(quantity))
-        if quantity_dec < min_qty:
-            return None
+        if quantity_dec < min_qty: return None
         adjusted_quantity = (quantity_dec // step_size) * step_size
-        if adjusted_quantity < min_qty:
-            return None
+        if adjusted_quantity < min_qty: return None
         return adjusted_quantity
     except Exception as e:
         logger.error(f"❌ [{symbol}] خطأ في ضبط LOT_SIZE: {e}", exc_info=True)
@@ -1565,7 +1114,6 @@ def calculate_position_size_fixed(symbol: str, entry_price: float,
     if override_amount is not None: desired_usdt_amount = override_amount
     elif not is_real: desired_usdt_amount = PAPER_TRADE_FIXED_AMOUNT_USDT
     else: desired_usdt_amount = random.uniform(FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT)
-
     try:
         dec_entry = Decimal(str(entry_price))
         if dec_entry <= 0: return None
@@ -1612,12 +1160,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_key: str, mtf_tr
     if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
     if not add_correlation_filter(symbol): log_rejection(symbol, "Correlation Filter Failed"); return
 
-    # Use the specific quality score from the revolutionary strategy if available
-    if 'final_quality' in df.columns:
-        quality_score = int(df.iloc[-1]['final_quality'])
-    else:
-        # Fallback to the generic one
-        quality_score = calculate_signal_quality_score(df, mtf_trend)
+    quality_score = calculate_ultra_momentum_quality_score(df, mtf_trend)
 
     with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
     if quality_score < min_score:
@@ -1707,7 +1250,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V35.0)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V36.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1774,7 +1317,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V35.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V36.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2181,7 +1724,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V35.0)</title>
+<title>الإعدادات - بوت 5 دقائق (V36.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2989,7 +2532,7 @@ def update_balance_loop():
         time.sleep(60 * 5)
 
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V35.0 (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V36.0 (5-Min Scalper) ======\n" + "="*50)
     init_db(); init_redis()
     try:
         client = Client(API_KEY, API_SECRET); client.ping()
@@ -3010,3 +2553,4 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
