@@ -138,7 +138,6 @@ REJECTION_REASONS_AR = {
     "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
     "Smart Market Structure Filter Failed": "فلتر هيكل السوق الذكي رفض الدخول",
-    "Advanced Market Structure Filter Failed": "فلتر هيكل السوق المتقدم V2 رفض الدخول",
     "Smart Liquidity Filter Failed": "فلتر السيولة الذكي رفض الدخول",
     "Smart Risk/Reward Filter Failed": "فلتر المخاطرة/العائد الذكي رفض الدخول",
 }
@@ -1047,241 +1046,33 @@ def check_mean_reversion_bb_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
 
     return True
 
-# ===== ADVANCED SMART MARKET STRUCTURE FILTER V2 =====
-
-def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
-    """
-    تحليل متقدم لهيكل السوق يشمل:
-    - اكتشاف القمم والقيعان الرئيسية (Swing High/Low)
-    - تحديد اتجاه الهيكل (Bullish/Bearish/Ranging)
-    - قياس قوة الهيكل
-    - اكتشاف كسر الهيكل (Break of Structure - BOS)
-    - اكتشاف تغيير الهيكل (Change of Character - CHoCH)
-    """
-    
-    if len(df) < 50:
-        return {"structure_type": "unknown", "strength": 0}
-    
-    # 1. اكتشاف القمم والقيعان الرئيسية
-    highs = df['high'].values
-    lows = df['low'].values
-    
-    # استخدام order=5 للحصول على نقاط تحول معنوية
-    swing_high_indices = argrelextrema(highs, np.greater, order=5)[0]
-    swing_low_indices = argrelextrema(lows, np.less, order=5)[0]
-    
-    # 2. تحليل اتجاه القمم والقيعان
-    structure_data = {
-        "swing_highs": [(i, highs[i]) for i in swing_high_indices[-5:]] if len(swing_high_indices) >= 2 else [],
-        "swing_lows": [(i, lows[i]) for i in swing_low_indices[-5:]] if len(swing_low_indices) >= 2 else [],
-        "structure_type": "ranging",
-        "strength": 0,
-        "bos_detected": False,
-        "choch_detected": False
-    }
-    
-    # 3. تحديد اتجاه الهيكل
-    if len(swing_high_indices) >= 3 and len(swing_low_indices) >= 3:
-        recent_highs = highs[swing_high_indices[-3:]]
-        recent_lows = lows[swing_low_indices[-3:]]
-        
-        # هيكل صاعد: قمم وقيعان أعلى (Higher Highs & Higher Lows)
-        highs_rising = all(recent_highs[i] < recent_highs[i+1] for i in range(len(recent_highs)-1))
-        lows_rising = all(recent_lows[i] < recent_lows[i+1] for i in range(len(recent_lows)-1))
-        
-        # هيكل هابط: قمم وقيعان أدنى (Lower Highs & Lower Lows)
-        highs_falling = all(recent_highs[i] > recent_highs[i+1] for i in range(len(recent_highs)-1))
-        lows_falling = all(recent_lows[i] > recent_lows[i+1] for i in range(len(recent_lows)-1))
-        
-        if highs_rising and lows_rising:
-            structure_data["structure_type"] = "bullish"
-            structure_data["strength"] = 85
-        elif highs_falling and lows_falling:
-            structure_data["structure_type"] = "bearish"
-            structure_data["strength"] = 15
-        elif highs_rising and not lows_falling:
-            structure_data["structure_type"] = "weak_bullish"
-            structure_data["strength"] = 60
-        elif highs_falling and not lows_rising:
-            structure_data["structure_type"] = "weak_bearish"
-            structure_data["strength"] = 40
-        else:
-            structure_data["structure_type"] = "ranging"
-            structure_data["strength"] = 50
-    
-    # 4. اكتشاف كسر الهيكل (BOS) وتغيير الهيكل (CHoCH)
-    if len(swing_high_indices) >= 2 and len(swing_low_indices) >= 2:
-        last_swing_high = highs[swing_high_indices[-2]]
-        last_swing_low = lows[swing_low_indices[-2]]
-        current_price = df['close'].iloc[-1]
-        
-        # BOS صاعد: كسر آخر قمة رئيسية
-        if current_price > last_swing_high * 1.002:
-            structure_data["bos_detected"] = True
-            structure_data["bos_direction"] = "bullish"
-        
-        # CHoCH: السعر كسر آخر قاع في اتجاه هابط (تغيير اتجاه)
-        if structure_data["structure_type"] in ["bullish", "weak_bullish"]:
-            if current_price < last_swing_low * 0.998:
-                structure_data["choch_detected"] = True
-                structure_data["choch_direction"] = "bearish"
-    
-    return structure_data
-
-
-def apply_advanced_market_structure_filter(df: pd.DataFrame, symbol: str) -> Tuple[bool, Optional[str]]:
-    """
-    فلتر هيكل السوق الذكي المتطور - يجمع بين عدة تقنيات:
-    1. تحليل القمم والقيعان (Swing Analysis)
-    2. اكتشاف كسر الهيكل (BOS)
-    3. اكتشاف مناطق السيولة (Liquidity Zones)
-    4. تحليل قوة الاتجاه (Trend Strength)
-    """
-    
-    if len(df) < 50:
-        return False, "Insufficient data for structure analysis"
-    
-    # 1. تحليل الهيكل الأساسي
-    structure = detect_market_structure(df)
-    
-    # 2. السماح فقط للهياكل القوية
-    if structure["strength"] < 55:
-        return False, f"Weak structure (strength: {structure['strength']})"
-    
-    # 3. الرفض في حالة تغيير الهيكل السلبي (CHoCH هابط)
-    if structure.get("choch_detected") and structure.get("choch_direction") == "bearish":
-        return False, "Bearish CHoCH detected - potential trend reversal"
-    
-    # 4. تحليل مناطق السيولة
-    liquidity_analysis = analyze_liquidity_zones(df)
-    if not liquidity_analysis["safe_to_trade"]:
-        return False, liquidity_analysis["reason"]
-    
-    # 5. تحليل قوة الاتجاه الحالي
-    last = df.iloc[-1]
-    
-    # تأكيد قوة الاتجاه بواسطة EMAs
-    # Make sure required EMAs are calculated if not present
-    if not all(k in df.columns for k in ['ema9', 'ema21', 'ema50']):
-        df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
-        df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
-        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-        last = df.iloc[-1]
-
-    ema_alignment = (
-        last['ema9'] > last['ema21'] > last['ema50']
-    )
-    
-    if not ema_alignment:
-        return False, "EMAs not properly aligned"
-    
-    # 6. التحقق من عدم وجود divergence سلبي
-    if detect_bearish_divergence(df):
-        return False, "Bearish divergence detected"
-    
-    return True, None
-
-
-def analyze_liquidity_zones(df: pd.DataFrame) -> Dict[str, any]:
-    """
-    تحليل مناطق السيولة - البحث عن مناطق تجمع الأوامر
-    """
-    
-    recent_highs = df['high'].tail(20)
-    recent_lows = df['low'].tail(20)
-    current_price = df['close'].iloc[-1]
-    
-    # البحث عن مناطق تكرار السعر (Equal Highs/Lows)
-    high_clusters = find_price_clusters(recent_highs.values)
-    low_clusters = find_price_clusters(recent_lows.values)
-    
-    # التحقق من عدم وجود منطقة سيولة قريبة جداً من السعر الحالي
-    danger_zone = False
-    reason = ""
-    
-    for cluster in high_clusters:
-        if abs(current_price - cluster) / current_price < 0.005:  # ضمن 0.5%
-            danger_zone = True
-            reason = f"Too close to liquidity zone at {cluster:.4f}"
-            break
-    
-    return {
-        "safe_to_trade": not danger_zone,
-        "reason": reason if danger_zone else "Clear liquidity path",
-        "high_clusters": high_clusters,
-        "low_clusters": low_clusters
-    }
-
-
-def find_price_clusters(prices: np.ndarray, tolerance: float = 0.003) -> List[float]:
-    """
-    إيجاد مناطق تجمع السعر (Price Clusters)
-    """
-    clusters = []
-    sorted_prices = np.sort(prices)
-    
-    i = 0
-    while i < len(sorted_prices):
-        cluster = [sorted_prices[i]]
-        j = i + 1
-        
-        while j < len(sorted_prices):
-            if abs(sorted_prices[j] - sorted_prices[i]) / sorted_prices[i] <= tolerance:
-                cluster.append(sorted_prices[j])
-                j += 1
-            else:
-                break
-        
-        if len(cluster) >= 2:  # على الأقل سعرين متقاربين
-            clusters.append(np.mean(cluster))
-        
-        i = j if j > i else i + 1
-    
-    return clusters
-
-
-def detect_bearish_divergence(df: pd.DataFrame) -> bool:
-    """
-    اكتشاف Divergence هابط بين السعر والـ RSI
-    """
-    
-    if len(df) < 20:
-        return False
-    
-    # Make sure RSI is calculated if not present
-    if 'rsi' not in df.columns:
-        delta = df['close'].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(window=7).mean()
-        avg_loss = loss.rolling(window=7).mean()
-        rs = avg_gain / avg_loss.replace(0, 1e-9)
-        df['rsi'] = 100 - (100 / (1 + rs))
-
-    recent_df = df.tail(20)
-    
-    # البحث عن قمتين في السعر
-    highs = recent_df['high'].values
-    rsi_values = recent_df['rsi'].values
-    
-    high_indices = argrelextrema(highs, np.greater, order=3)[0]
-    
-    if len(high_indices) >= 2:
-        last_high_idx = high_indices[-1]
-        prev_high_idx = high_indices[-2]
-        
-        # السعر يصنع قمة أعلى
-        price_higher_high = highs[last_high_idx] > highs[prev_high_idx]
-        
-        # RSI يصنع قمة أدنى (Divergence)
-        rsi_lower_high = rsi_values[last_high_idx] < rsi_values[prev_high_idx]
-        
-        if price_higher_high and rsi_lower_high:
-            return True
-    
-    return False
-
 # ===== SMART DYNAMIC FILTERS (IMPROVED) =====
+
+def apply_smart_market_structure_filter(df: pd.DataFrame, symbol: str) -> bool:
+    """
+    فلتر بنية السوق الذكي - يتحقق من وجود انحياز صاعد عام (أكثر مرونة)
+    """
+    if len(df) < 50: return False
+    
+    recent_period = df.tail(20)
+    last_candle = recent_period.iloc[-1]
+    
+    # 1. التحقق من وجود انحياز للقمم الصاعدة
+    # القمة الأخيرة يجب أن تكون أعلى من متوسط آخر 5 قمم
+    avg_high = recent_period['high'].rolling(5).mean().iloc[-1]
+    if last_candle['high'] < avg_high:
+        log_rejection(symbol, "Smart Market Structure Filter Failed", {"reason": "Low High"})
+        return False
+        
+    # 2. التحقق من وجود انحياز للقيعان الصاعدة
+    # القاع الأخير يجب أن يكون أعلى من متوسط آخر 5 قيعان
+    avg_low = recent_period['low'].rolling(5).mean().iloc[-1]
+    if last_candle['low'] < avg_low:
+        log_rejection(symbol, "Smart Market Structure Filter Failed", {"reason": "Low Low"})
+        return False
+
+    return True
+
 
 def apply_smart_liquidity_filter(df: pd.DataFrame, symbol: str) -> bool:
     """
@@ -1399,14 +1190,8 @@ def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str) -> Option
     """
     market_regime = calculate_market_regime(df)
     
-    # Use the new advanced market structure filter V2 which also includes liquidity checks
-    passed, reason = apply_advanced_market_structure_filter(df, symbol)
-    if not passed:
-        log_rejection(symbol, "Advanced Market Structure Filter Failed", {"reason": reason})
-        return None
-
-    # The original liquidity filter is now redundant as it's part of the advanced filter
-    # if not apply_smart_liquidity_filter(df, symbol): return None
+    if not apply_smart_market_structure_filter(df, symbol): return None
+    if not apply_smart_liquidity_filter(df, symbol): return None
     
     with strategy_filters_lock:
         strategies_to_check = {k: v for k, v in ENHANCED_STRATEGIES.items()}
