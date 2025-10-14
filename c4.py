@@ -918,42 +918,136 @@ def check_advanced_pullback_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     
     return True
 
-
 def check_breakout_retest_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
-    استراتيجية الاختراق وإعادة الاختبار - جديدة تماماً
-    تبحث عن اختراقات لمقاومات رئيسية مع إعادة اختبار صحية
+    استراتيجية الاختراق وإعادة الاختبار المحسّنة
+    تبحث عن اختراقات قوية لمستويات مقاومة واضحة مع إعادة اختبار صحية
     """
     if len(df) < 100: return False
     last = df.iloc[-1]
+    prev = df.iloc[-2]
     
     try:
+        # 1. تحديد مستويات المقاومة بطريقة أكثر دقة
+        # استخدام نافذة أصغر لتحديد القمم القريبة (order=5 بدلاً من 7)
         highs = df['high'].values
-        resistance_indices = argrelextrema(highs, np.greater, order=7)[0]
-        if len(resistance_indices) < 2: return False
+        resistance_indices = argrelextrema(highs, np.greater, order=5)[0]
         
-        latest_resistance_idx = resistance_indices[-1]
-        resistance_price = highs[latest_resistance_idx]
+        # نحتاج على الأقل قمتين لتأكيد المقاومة
+        if len(resistance_indices) < 2: 
+            return False
         
-        if not (df['high'].tail(10) > resistance_price * 1.002).any(): return False
+        # البحث عن آخر مقاومة قوية في آخر 50 شمعة
+        recent_resistance_indices = [idx for idx in resistance_indices if idx >= len(df) - 50]
+        if not recent_resistance_indices:
+            return False
         
-        retest_zone_upper = resistance_price * 1.008
-        retest_zone_lower = resistance_price * 0.998
-        if not (retest_zone_lower <= last['close'] <= retest_zone_upper): return False
+        # أخذ أعلى مستوى مقاومة من آخر 50 شمعة
+        resistance_price = max(highs[idx] for idx in recent_resistance_indices)
         
-        breakout_candle_idx = df[df['high'] > resistance_price * 1.002].index[-1]
-        breakout_volume = df.loc[breakout_candle_idx, 'volume']
-        volume_ma = df['volume'].rolling(20).mean().loc[breakout_candle_idx]
-        if not breakout_volume > volume_ma * 1.5: return False
+        # 2. التحقق من حدوث الاختراق (خلال آخر 15 شمعة)
+        breakout_window = df.tail(15)
+        breakout_happened = (breakout_window['high'] > resistance_price * 1.003).any()
         
-        if not (last['ema9'] > last['ema21'] > last['ema50']): return False
-        if last['macd_hist'] <= 0: return False
-        if last['adx'] < 20: return False
+        if not breakout_happened:
+            return False
+        
+        # تحديد شمعة الاختراق
+        breakout_candles = breakout_window[breakout_window['high'] > resistance_price * 1.003]
+        if breakout_candles.empty:
+            return False
+            
+        breakout_candle = breakout_candles.iloc[0]
+        breakout_idx = breakout_candle.name
+        
+        # 3. التحقق من قوة الاختراق (حجم تداول قوي + إغلاق فوق المقاومة)
+        breakout_volume = breakout_candle['volume']
+        volume_ma20 = df['volume'].rolling(20).mean().loc[breakout_idx]
+        
+        # حجم الاختراق يجب أن يكون أعلى من المتوسط
+        volume_confirmation = breakout_volume > volume_ma20 * 1.3
+        
+        # الاختراق يجب أن يُغلق فوق المقاومة (وليس مجرد فتيل)
+        close_above_resistance = breakout_candle['close'] > resistance_price * 1.001
+        
+        if not (volume_confirmation and close_above_resistance):
+            return False
+        
+        # 4. التحقق من إعادة الاختبار الصحية
+        # منطقة إعادة الاختبار: من المقاومة القديمة إلى أعلى قليلاً
+        retest_zone_lower = resistance_price * 0.997  # تحت المقاومة بـ 0.3%
+        retest_zone_upper = resistance_price * 1.010  # فوق المقاومة بـ 1%
+        
+        # السعر الحالي يجب أن يكون في منطقة إعادة الاختبار
+        in_retest_zone = retest_zone_lower <= last['close'] <= retest_zone_upper
+        
+        if not in_retest_zone:
+            return False
+        
+        # 5. التأكد من أن إعادة الاختبار حدثت بعد الاختراق (وليس قبله)
+        candles_since_breakout = len(df) - df.index.get_loc(breakout_idx) - 1
+        
+        # يجب أن يكون الاختراق حدث خلال آخر 5-12 شمعة
+        if not (3 <= candles_since_breakout <= 12):
+            return False
+        
+        # 6. التحقق من استمرار الاتجاه الصاعد (EMAs)
+        # يجب أن تكون المتوسطات مرتبة بشكل صاعد
+        ema_alignment = (last['ema9'] > last['ema21']) and (last['ema21'] > last['ema50'])
+        
+        if not ema_alignment:
+            return False
+        
+        # 7. تأكيد الزخم الإيجابي
+        # MACD يجب أن يكون إيجابياً أو على الأقل يتحول للإيجابية
+        macd_positive_or_turning = (
+            last['macd_hist'] > 0 or 
+            (last['macd_hist'] > prev['macd_hist'] and last['macd_hist'] > -0.0001)
+        )
+        
+        if not macd_positive_or_turning:
+            return False
+        
+        # 8. ADX يؤكد وجود اتجاه (ولكن ليس بشرط صارم)
+        # في إعادة الاختبار، ADX قد يكون منخفضاً قليلاً
+        adx_acceptable = last['adx'] > 18  # خفضنا من 20 إلى 18
+        
+        if not adx_acceptable:
+            return False
+        
+        # 9. RSI في منطقة صحية (ليس في تشبع شرائي)
+        rsi_healthy = 45 < last['rsi'] < 75
+        
+        if not rsi_healthy:
+            return False
+        
+        # 10. حجم التداول أثناء إعادة الاختبار يجب أن يكون معتدلاً (وليس ضعيفاً جداً)
+        recent_volume_avg = df['volume'].tail(5).mean()
+        volume_ma_recent = df['volume'].rolling(20).mean().iloc[-1]
+        
+        # الحجم لا يجب أن ينخفض بشكل كبير أثناء إعادة الاختبار
+        volume_sustained = recent_volume_avg > volume_ma_recent * 0.7
+        
+        if not volume_sustained:
+            return False
+        
+        # 11. التحقق من عدم وجود اتجاه هابط قوي في الأطر الزمنية الأعلى
+        if mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish':
+            return False
+        
+        # 12. فحص استقرار السعر أثناء إعادة الاختبار
+        # السعر لا يجب أن يكون متذبذباً بشكل عنيف
+        recent_candles = df.tail(3)
+        price_stability = (recent_candles['high'].max() - recent_candles['low'].min()) / last['close'] < 0.02
+        
+        if not price_stability:
+            return False
         
         return True
-    except Exception:
+        
+    except Exception as e:
+        logger.error(f"[Breakout Retest Strategy] Error: {e}", exc_info=True)
         return False
-
 
 def check_volume_price_divergence_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
@@ -3049,9 +3143,10 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     }
     reason_ar = reason_map.get(reason, reason)
     log_and_notify("info", f"Closed {trade_type} trade for {symbol}. Profit: {profit:.2f}%", "TRADE_CLOSED")
-    settings = get_notification_settings()
-    if (profit >= settings['min_profit_notification'] or profit <= settings['max_loss_notification'] or reason == "manual_close"):
-        send_enhanced_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
+
+    # --- إصلاح: إزالة الشرط لضمان إرسال إشعار تلغرام عند كل إغلاق ---
+    send_enhanced_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
+
 
 def trade_management_loop():
     logger.info("🚀 [Trade Manager] Starting advanced trade management loop...")
