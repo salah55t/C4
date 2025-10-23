@@ -1,13 +1,11 @@
-# ملف c4_video_strategy_v36.py - نسخة V36.0.0 (تطبيق استراتيجية الفيديو - 4H Range)
+# ملف c4_video_strategy_v36.py - نسخة V36.0.0 (إضافة استراتيجية الفيديو الثانية)
 # --- وصف التعديلات:
-# 1. [استراتيجية الفيديو] تم استبدال الاستراتيجية السابقة (Price Action Reaction) باستراتيجية الفيديو (4H Range Fakeout).
-# 2. [منطق الاستراتيجية] الاستراتيجية الجديدة تحاكي منطق الفيديو (الجزء الخاص بالشراء LONG فقط):
-#    - تحديد نطاق أول شمعة 4 ساعات في اليوم (باستخدام UTC).
-#    - انتظار إغلاق شمعة 5 دقائق أسفل النطاق.
-#    - انتظار إغلاق شمعة 5 دقائق تالية داخل النطاق.
-# 3. [إدارة المخاطر] تم تعديل وقف الخسارة ليكون أسفل "شمعة الاختراق" (التي أغلقت بالخارج)، كما في الفيديو.
-# 4. [حالة يومية] إضافة متغير عام و دالة (`daily_4h_range`, `update_daily_4h_range`) لتتبع نطاق الـ 4 ساعات.
-# 5. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام (Flask, DB, WS, إلخ).
+# 1. [إضافة استراتيجية] تم إضافة استراتيجية الفيديو "Extreme_Fade_BB_Strategy".
+# 2. [الحفاظ على الاستراتيجية] تم الإبقاء على الاستراتيجية الحالية "Price_Action_Reaction_Strategy".
+# 3. [تعديل المؤشرات] تم إضافة حساب 3-SD Bollinger Bands في دالة `calculate_all_features`.
+# 4. [تعديل وقف الخسارة] تم تحديث دالة `calculate_smart_stop_loss` للتعامل مع كلتا الاستراتيجيتين.
+# 5. [تعديل الجودة] تم تحديث دالة `calculate_signal_quality_score` لتكون أكثر عمومية وتناسب كلتا الاستراتيجيتين (باستخدام RSI).
+# 6. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام.
 
 import time
 import os
@@ -48,11 +46,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v36_4h_range_strategy_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v36_dual_strategy_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV36.0.0_4H_Range_Strategy')
+logger = logging.getLogger('CryptoBotV36.0.0_DualStrategy')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -96,7 +94,7 @@ FIXED_TRADE_AMOUNT_MAX_USDT: float = 6.5  # للصفقات الحقيقية فق
 trade_amount_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.0
-MIN_SIGNAL_QUALITY: int = 50 # تم تخفيضه ليتناسب مع الاستراتيجية الجديدة
+MIN_SIGNAL_QUALITY: int = 50 
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
 min_quality_lock = Lock()
 strategy_filters_lock = Lock()
@@ -127,12 +125,6 @@ rejection_logs_lock = Lock()
 current_market_state: Dict[str, Any] = {"trend_details_by_tf": {}}
 market_state_lock = Lock()
 
-# ===== MODIFICATION: 4H Range Cache =====
-# كاش لتخزين نطاق الـ 4 ساعات لكل عملة لتجنب الحسابات المتكررة
-daily_4h_range: Dict[str, Dict] = {}
-daily_4h_range_lock = Lock()
-# ========================================
-
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
     # General Filters
@@ -149,10 +141,14 @@ REJECTION_REASONS_AR = {
     "Smart Market Structure Filter Failed": "فلتر هيكل السوق الذكي رفض الدخول",
     "Smart Liquidity Filter Failed": "فلتر السيولة الذكي رفض الدخول",
     "Smart Risk/Reward Filter Failed": "فلتر المخاطرة/العائد الذكي رفض الدخول",
-    # ===== MODIFICATION: Video Strategy Reasons =====
-    "4H Range Not Found": "استراتيجية الفيديو: لم يتم العثور على نطاق الـ 4 ساعات",
-    "Against Trend": "استراتيجية الفيديو: الدخول عكس الاتجاه العام",
-    # =============================================
+    # Price Action Strategy Specific
+    "No Support Level Found": "استراتيجية رد الفعل: لم يتم العثور على مستوى دعم واضح",
+    "Price Did Not Hit Support": "استراتيجية رد الفعل: السعر لم يلمس مستوى الدعم",
+    "No Reaction Candle": "استراتيجية رد الفعل: لم تظهر شمعة رد فعل إيجابية",
+    "Against Trend": "استراتيجية رد الفعل: الدخول عكس الاتجاه العام",
+    # NEW: Bollinger Bands Strategy Specific
+    "Extreme Fade: Not Below 3SD": "استراتيجية BB: الإشارة لم تغلق أسفل 3SD",
+    "Extreme Fade: No Confirmation": "استراتيجية BB: لم يتم تأكيد الإغلاق أعلى 2SD",
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -563,9 +559,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     time.sleep(API_REQUEST_DELAY)
     try:
-        # طلب يوم إضافي لضمان وجود بيانات كافية لحسابات 4h
-        days_to_fetch = days + 1 if interval == '4h' else days
-        klines = client.get_historical_klines(symbol, interval, f"{days_to_fetch} day ago UTC")
+        klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
         if not klines: return None
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
@@ -575,53 +569,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return df.dropna().astype(float)
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
-
-# ===== MODIFICATION: 4H Range Update Function =====
-def update_daily_4h_range(symbol: str) -> Optional[Dict]:
-    """
-    يحصل على نطاق (أعلى/أدنى) أول شمعة 4 ساعات لليوم الحالي (بتوقيت UTC) ويخزنها.
-    توقيت UTC هو البديل الموثوق برمجياً لمتطلبات "توقيت نيويورك" في الفيديو.
-    """
-    global daily_4h_range
-    today_utc = datetime.now(timezone.utc).date()
-    
-    with daily_4h_range_lock:
-        cached_range = daily_4h_range.get(symbol)
-        if cached_range and cached_range.get('date') == today_utc:
-            return cached_range # استخدام الكاش إذا كان لليوم الحالي
-
-    try:
-        # جلب بيانات يومين لضمان الحصول على شمعة اليوم الأول
-        df_4h = fetch_historical_data(symbol, '4h', days=2)
-        if df_4h is None or df_4h.empty:
-            logger.warning(f"[{symbol}] 4H Klines data not found for range calculation.")
-            return None
-
-        # العثور على أول شمعة لليوم الحالي
-        df_4h_today = df_4h[df_4h.index.date == today_utc]
-        
-        if df_4h_today.empty:
-            # قد يكون اليوم قد بدأ للتو ولم تتكون شمعة 4h بعد
-            logger.info(f"[{symbol}] No 4H candle found for today ({today_utc}) yet.")
-            return None
-            
-        first_candle_of_day = df_4h_today.iloc[0]
-        range_data = {
-            'high': float(first_candle_of_day['high']),
-            'low': float(first_candle_of_day['low']),
-            'date': today_utc
-        }
-        
-        with daily_4h_range_lock:
-            daily_4h_range[symbol] = range_data
-            logger.info(f"[{symbol}] New 4H Range Calculated for {today_utc}: High={range_data['high']}, Low={range_data['low']}")
-        
-        return range_data
-
-    except Exception as e:
-        logger.error(f"❌ [{symbol}] Error calculating daily 4H range: {e}", exc_info=True)
-        return None
-# ===============================================
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
@@ -664,12 +611,17 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
     
-    # --- Bollinger Bands ---
+    # --- Bollinger Bands (2-SD and 3-SD) ---
     bb_middle = df_calc['close'].rolling(window=20).mean()
     bb_std = df_calc['close'].rolling(window=20).std()
     df_calc['bb_middle'] = bb_middle
+    # 2-SD (Standard)
     df_calc['bb_lower'] = bb_middle - (bb_std * 2)
     df_calc['bb_upper'] = bb_middle + (bb_std * 2)
+    # NEW: 3-SD (For Extreme Fade Strategy)
+    df_calc['bb_lower_3sd'] = bb_middle - (bb_std * 3)
+    df_calc['bb_upper_3sd'] = bb_middle + (bb_std * 3)
+    
     df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, 1e-9)
     
     # --- MACD ---
@@ -696,30 +648,26 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     
     return df_calc
 
-# ===== NEW: Signal Quality Scoring System (Simplified) =====
+# ===== UPDATED: Signal Quality Scoring System (Generic) =====
 def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
     """
     يحسب نقاط جودة للإشارة (من 0 إلى 100) بناءً على عدة عوامل فنية.
-    مبسط ليتناسب مع استراتيجية الفيديو.
+    تم تعديله ليكون عاماً ويناسب استراتيجيات الشراء عند الانخفاض (مثل RSI و BB).
     """
     score = 50  # Starting baseline score
     last = df.iloc[-1]
     
-    # 1. قوة "رد الفعل" (Max 30 points)
-    # (شمعة العودة لداخل النطاق)
-    candle_range = last['high'] - last['low']
-    if candle_range > 0:
-        # شمعة صاعدة قوية أغلقت قرب القمة
-        rejection_ratio = (last['close'] - last['low']) / candle_range
-        if rejection_ratio > 0.75 and last['close'] > last['open']:
-            score += 30 # رد فعل قوي جداً
-        elif rejection_ratio > 0.5 and last['close'] > last['open']:
-            score += 15 # رد فعل جيد
+    # 1. مؤشر القوة النسبية (Oversold condition) (Max 30 points)
+    rsi = last.get('rsi', 50)
+    if rsi < 30:
+        score += 30 # تشبع بيعي قوي
+    elif rsi < 40:
+        score += 15 # منطقة بيع
     
     # 2. تأكيد الحجم (Max 20 points)
     volume_ma20 = df['volume'].rolling(20).mean().iloc[-1]
     if last['volume'] > volume_ma20 * 1.5:
-        score += 20  # حجم جيد على شمعة العودة
+        score += 20  # حجم جيد
     elif last['volume'] > volume_ma20:
         score += 10
         
@@ -734,10 +682,6 @@ def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
     if 0.7 < atr_percent < 2.5:
         score += 10  # تقلب مثالي للتداول
 
-    # 5. فلتر اتجاه ( بسيط )
-    if last['ema21'] > last['ema50']:
-        score += 10 # مع الاتجاه القصير
-        
     return min(100, int(score))
 
 # --- Data Loading & Settings Management ---
@@ -782,7 +726,7 @@ def load_settings_from_redis():
         quality_settings_data = redis_client.get('signal_quality_settings')
         if quality_settings_data:
             quality_settings = json.loads(quality_settings_data)
-            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 50) # تم تحديث القيمة الافتراضية
+            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 50) 
 
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
@@ -870,176 +814,212 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     return True
     
-# ===== MODIFICATION: NEW VIDEO STRATEGY (4H Range Fakeout) =====
+# ===== STRATEGIES BLOCK =====
 
-def check_4h_range_fakeout_strategy(df: pd.DataFrame, mtf_trend: Dict, daily_range: Optional[Dict]) -> bool:
+# --- STRATEGY 1: Price Action Reaction (Existing) ---
+def check_price_action_reaction_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
-    استراتيجية الاختراق الكاذب لنطاق الـ 4 ساعات (من الفيديو) - نسخة الشراء فقط
-    تبحث عن إغلاق أسفل النطاق ثم عودة سريعة لداخله.
+    استراتيجية رد الفعل السعري (من الفيديو السابق)
+    تبحث عن رد فعل (شمعة صاعدة) عند مستوى دعم واضح (قاع سابق).
     """
-    if not daily_range:
-        # log_rejection(df.name, "4H Range Not Found") # سيتم تسجيله في اللوب الرئيسي
+    if len(df) < 50:
         return False
 
-    if len(df) < 3: # نحتاج شمعتين على الأقل (الحالية والسابقة)
-        return False
-
-    range_low = daily_range['low']
     last = df.iloc[-1]
-    prev = df.iloc[-2] # الشمعة التي أغلقت
     
-    # 1. التحقق من إغلاق الشمعة السابقة أسفل النطاق
-    closed_outside = prev['close'] < range_low
+    # 1. تحديد مستوى الدعم (أدنى قاع في آخر 30 شمعة)
+    lookback_period = 30
+    recent_lows_df = df.tail(lookback_period)
     
-    # 2. التحقق من إغلاق الشمعة الحالية داخل النطاق
-    closed_inside = last['close'] > range_low
-
-    if closed_outside and closed_inside:
-        # 3. فلتر اتجاه بسيط (لتجنب الشراء في اتجاه هابط قوي)
-        if not (last['ema21'] > last['ema50']):
-            log_rejection(df.name, "Against Trend", {"reason": "EMA21 < EMA50"})
-            return False
-            
-        # 4. فلتر حجم تداول (للتأكد من وجود اهتمام)
-        volume_ma = df['volume'].rolling(20).mean().iloc[-1]
-        if not last['volume'] > volume_ma * 0.8: # على الأقل 80% من متوسط الحجم
-            log_rejection(df.name, "Low Quality Signal", {"reason": "Low volume on reaction"})
-            return False
-
-        # إذا نجحت جميع الشروط
-        logger.info(f"✅ [{df.name}] 4H Range Fakeout Strategy (LONG) Triggered at low {range_low:.4f}")
-        return True
-
-    return False
-# ==========================================================
-
-
-# ===== SMART DYNAMIC FILTERS (Kept but disabled in find_best_strategy) =====
-
-def apply_smart_market_structure_filter(df: pd.DataFrame, symbol: str) -> bool:
-    """
-    فلتر بنية السوق الذكي - يتحقق من وجود انحياز صاعد عام (أكثر مرونة)
-    """
-    if len(df) < 50: return False
+    support_indices = argrelextrema(recent_lows_df['low'].values, np.less_equal, order=3)[0]
     
-    recent_period = df.tail(20)
-    last_candle = recent_period.iloc[-1]
-    
-    # 1. التحقق من وجود انحياز للقمم الصاعدة
-    # القمة الأخيرة يجب أن تكون أعلى من متوسط آخر 5 قمم
-    avg_high = recent_period['high'].rolling(5).mean().iloc[-1]
-    if last_candle['high'] < avg_high:
-        log_rejection(symbol, "Smart Market Structure Filter Failed", {"reason": "Low High"})
+    if len(support_indices) == 0:
+        recent_support_level = recent_lows_df['low'].min()
+    else:
+        recent_support_level = recent_lows_df.iloc[support_indices]['low'].min()
+
+    if pd.isna(recent_support_level):
+        log_rejection(df.name, "No Support Level Found")
+        return False
+
+    # 2. التحقق من لمس السعر لمستوى الدعم
+    touched_support = (last['low'] <= recent_support_level * 1.003) or \
+                      (df.iloc[-2]['low'] <= recent_support_level * 1.003)
+
+    if not touched_support:
+        # log_rejection(df.name, "Price Did Not Hit Support", {"low": last['low'], "support": recent_support_level})
+        return False
+
+    # 3. التحقق من "رد الفعل" (شمعة صاعدة قوية / شمعة رفض)
+    candle_range = last['high'] - last['low']
+    if candle_range == 0: 
+        log_rejection(df.name, "No Reaction Candle", {"reason": "Doji candle"})
+        return False
+
+    is_bullish = last['close'] > last['open']
+    is_rejection = (last['close'] - last['low']) / candle_range > 0.5 
+
+    if not (is_bullish and is_rejection):
+        log_rejection(df.name, "No Reaction Candle", {"reason": "Not bullish or not rejection"})
+        return False
+
+    # 4. فلتر اتجاه بسيط
+    if not (last['ema21'] > last['ema50']):
+        log_rejection(df.name, "Against Trend", {"reason": "EMA21 < EMA50"})
         return False
         
-    # 2. التحقق من وجود انحياز للقيعان الصاعدة
-    # القاع الأخير يجب أن يكون أعلى من متوسط آخر 5 قيعان
-    avg_low = recent_period['low'].rolling(5).mean().iloc[-1]
-    if last_candle['low'] < avg_low:
-        log_rejection(symbol, "Smart Market Structure Filter Failed", {"reason": "Low Low"})
+    # 5. فلتر حجم تداول
+    volume_ma = df['volume'].rolling(20).mean().iloc[-1]
+    if not last['volume'] > volume_ma * 0.8: 
+        log_rejection(df.name, "Low Quality Signal", {"reason": "Low volume on reaction"})
         return False
 
+    logger.info(f"✅ [{df.name}] Price Action Strategy Triggered at support {recent_support_level:.4f}")
     return True
 
-
-def apply_smart_liquidity_filter(df: pd.DataFrame, symbol: str) -> bool:
+# --- NEW: STRATEGY 2: Extreme Fade (From Video) ---
+def check_extreme_fade_bb_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
-    فلتر السيولة الذكي - يتحقق من جودة السيولة مع استثناء للزيادات الإيجابية في الحجم
+    استراتيجية الانعكاس المتطرف (من الفيديو الجديد)
+    تبحث عن إغلاق أسفل 3-SD BB ثم إغلاق تأكيدي أعلى 2-SD BB.
+    (نسخة الشراء فقط)
     """
-    if len(df) < 20: return False
+    if len(df) < 21: # (20 for BB + 1 previous candle)
+        return False
+    
+    # Check if new columns exist
+    if 'bb_lower_3sd' not in df.columns or 'bb_lower' not in df.columns:
+        logger.warning(f"[{df.name}] BB 3SD columns not found. Skipping strategy.")
+        return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # 1. نسبة Spread (High - Low) إلى السعر
+    # 1. Signal Candle (Previous Candle)
+    # هل أغلقت الشمعة السابقة عند أو أسفل خط 3-SD؟
+    signal_candle_closed_below_3sd = prev['close'] <= prev['bb_lower_3sd']
+    
+    if not signal_candle_closed_below_3sd:
+        # log_rejection(df.name, "Extreme Fade: Not Below 3SD") # Too noisy to log
+        return False
+
+    # 2. Confirmation Candle (Last/Current Candle)
+    # هل أغلقت الشمعة الحالية مرة أخرى أعلى خط 2-SD؟
+    confirmation_candle_closed_above_2sd = last['close'] > last['bb_lower']
+
+    if not confirmation_candle_closed_above_2sd:
+        log_rejection(df.name, "Extreme Fade: No Confirmation", {"close": last['close'], "bb_lower_2sd": last['bb_lower']})
+        return False
+    
+    # 3. Trend Filter (simple)
+    if not (last['ema50'] > last['ema200']):
+        log_rejection(df.name, "Against Trend", {"reason": "EMA50 < EMA200"})
+        return False
+
+    # 4. Volume Filter
+    volume_ma = df['volume'].rolling(20).mean().iloc[-1]
+    if not last['volume'] > volume_ma * 0.8: 
+        log_rejection(df.name, "Low Quality Signal", {"reason": "Low volume on confirmation"})
+        return False
+        
+    logger.info(f"✅ [{df.name}] Extreme Fade BB Strategy Triggered!")
+    return True
+
+# ===== SMART DYNAMIC FILTERS (Kept but disabled in find_best_strategy) =====
+
+def apply_smart_market_structure_filter(df: pd.DataFrame, symbol: str) -> bool:
+    if len(df) < 50: return False
+    recent_period = df.tail(20)
+    last_candle = recent_period.iloc[-1]
+    avg_high = recent_period['high'].rolling(5).mean().iloc[-1]
+    if last_candle['high'] < avg_high:
+        log_rejection(symbol, "Smart Market Structure Filter Failed", {"reason": "Low High"})
+        return False
+    avg_low = recent_period['low'].rolling(5).mean().iloc[-1]
+    if last_candle['low'] < avg_low:
+        log_rejection(symbol, "Smart Market Structure Filter Failed", {"reason": "Low Low"})
+        return False
+    return True
+
+
+def apply_smart_liquidity_filter(df: pd.DataFrame, symbol: str) -> bool:
+    if len(df) < 20: return False
+    last = df.iloc[-1]; prev = df.iloc[-2]
     spread_ratio = (last['high'] - last['low']) / last['close']
     if spread_ratio > 0.05:
         log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Spread > 5% ({spread_ratio:.2f}%)"})
         return False
-    
-    # 2. حجم التداول مستقر (لا تذبذب عنيف)
     volume_std = df['volume'].tail(20).std()
     volume_mean = df['volume'].tail(20).mean()
     cv = volume_std / volume_mean if volume_mean > 0 else 999
-    
     if cv > 2.0:
-        # استثناء: إذا كان تذبذب الحجم مرتفعاً ولكنه مصحوب بحركة سعرية إيجابية، فقد يكون اختراقاً
         is_bullish_volume_spike = (last['close'] > prev['close']) and (last['volume'] > volume_mean * 1.5)
         if not is_bullish_volume_spike:
             log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Volume CV > 2.0 ({cv:.2f})"})
             return False
-        else:
-            logger.info(f"[{symbol}] Liquidity filter bypassed due to bullish volume spike.")
-
-    # 3. السعر لا يتحرك بقفزات كبيرة
+        else: logger.info(f"[{symbol}] Liquidity filter bypassed due to bullish volume spike.")
     price_changes = df['close'].pct_change().tail(10).abs()
     max_price_jump = price_changes.max()
     if max_price_jump > 0.05:
         log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Price Jump > 5% ({max_price_jump:.2f}%)"})
         return False
-    
     return True
 
 
 def apply_smart_risk_reward_filter(entry_price: float, stop_loss: float, target1: float, target2: float) -> bool:
-    """ فلتر نسبة المخاطرة/العائد الذكي """
     risk = entry_price - stop_loss
     if risk <= 0: return False
-    
     reward1 = target1 - entry_price
     reward2 = target2 - entry_price
-    
     rr1 = reward1 / risk if risk > 0 else 0
     rr2 = reward2 / risk if risk > 0 else 0
-    
-    # نسبة 1:2 للهدف الأول
     if rr1 < 1.9: return False 
-    # نسبة 1:3 للهدف الثاني
     if rr2 < 2.9: return False
-    
-    # لا تزيد المخاطرة عن 3%
     if (risk / entry_price) > 0.03: return False
-    
     return True
 
 
 def calculate_market_regime(df: pd.DataFrame) -> str:
-    """ تحديد نظام السوق الحالي (trending, ranging, volatile) """
     if len(df) < 50: return 'unknown'
     last = df.iloc[-1]
-    
     adx = last.get('adx', 0)
     bb_width = last.get('bb_width', 0)
     bb_width_ma = df['bb_width'].rolling(50).mean().iloc[-1]
     atr_percent = last.get('atr_percent', 0)
-    
     if adx > 25 and atr_percent < 2.5: return 'trending'
     elif adx < 20 and bb_width < bb_width_ma * 0.8: return 'ranging'
     elif atr_percent > 3.0: return 'volatile'
     else: return 'mixed'
 
 
-# ===== MODIFICATION: STRATEGY SELECTOR (Updated) =====
+# ===== STRATEGY SELECTOR (Modified) =====
 
 ENHANCED_STRATEGIES = {
-    "4H_Range_Fakeout_Strategy": {
-        "name": "استراتيجية اختراق الـ 4 ساعات (Video)",
-        "check_function": check_4h_range_fakeout_strategy,
+    "Price_Action_Reaction_Strategy": {
+        "name": "استراتيجية رد الفعل السعري (Support)",
+        "check_function": check_price_action_reaction_strategy,
         "enabled": True, "best_regime": ['trending', 'mixed', 'ranging'], "risk_level": 'medium'
+    },
+    # --- NEW STRATEGY ADDED ---
+    "Extreme_Fade_BB_Strategy": {
+        "name": "استراتيجية الانعكاس المتطرف (BB Video)",
+        "check_function": check_extreme_fade_bb_strategy,
+        "enabled": True, "best_regime": ['ranging', 'mixed'], "risk_level": 'high'
     }
 }
 
+# سيتم تحديث هذا القاموس تلقائياً
 STRATEGY_NAMES = {key: info['name'] for key, info in ENHANCED_STRATEGIES.items()}
 
 
-def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str, daily_range: Optional[Dict]) -> Optional[Tuple[str, str]]:
+def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str) -> Optional[Tuple[str, str]]:
     """
     يبحث عن أفضل استراتيجية مناسبة للوضع الحالي
-    (تم تعديله ليعمل فقط باستراتيجية الفيديو)
+    (تم تعديله ليعمل الآن على استراتيجيتين)
     """
     market_regime = calculate_market_regime(df)
     
-    # --- تم تعطيل الفلاتر المعقدة لتطبيق استراتيجية الفيديو البسيطة ---
+    # --- تم تعطيل الفلاتر المعقدة للتبسيط ---
     # if not apply_smart_market_structure_filter(df, symbol): return None
     # if not apply_smart_liquidity_filter(df, symbol): return None
     # -----------------------------------------------------------------
@@ -1047,13 +1027,12 @@ def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str, daily_ran
     with strategy_filters_lock:
         strategies_to_check = {k: v for k, v in ENHANCED_STRATEGIES.items()}
 
+    # يتم فحص الاستراتيجيات بالترتيب
     for strategy_key, strategy_info in strategies_to_check.items():
         if not strategy_info['enabled']: continue
-        # if market_regime not in strategy_info['best_regime'] and market_regime != 'mixed': continue
         
         try:
-            # تمرير النطاق اليومي إلى دالة التحقق
-            if strategy_info['check_function'](df, mtf_trend, daily_range):
+            if strategy_info['check_function'](df, mtf_trend):
                 return (strategy_key, strategy_info['name'])
         except Exception as e:
             logger.error(f"❌ [{symbol}] Error checking strategy {strategy_key}: {e}", exc_info=True)
@@ -1062,35 +1041,41 @@ def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str, daily_ran
     return None
 
 
-# ===== MODIFICATION: STOP LOSS (Video Strategy) =====
+# ===== MODIFIED: STOP LOSS & TAKE PROFIT (Multi-Strategy) =====
 
 def calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     """
-    حساب وقف الخسارة بناءً على استراتيجية الفيديو:
-    أسفل شمعة الاختراق (الشمعة السابقة)
+    حساب وقف الخسارة بناءً على الاستراتيجية المحددة.
     """
     stop_loss = 0.0
 
-    if strategy_name == "4H_Range_Fakeout_Strategy":
-        # قاع الشمعة السابقة (التي أغلقت خارج النطاق)
-        breakout_candle_low = df.iloc[-2]['low']
-        # وضع الوقف أسفل قاع شمعة الاختراق مع هامش بسيط
-        stop_loss = breakout_candle_low * 0.998 # هامش 0.2% أسفل القاع
-    
-    else:
-        # (Fallback) - الاستراتيجية الافتراضية السابقة
+    if strategy_name == "Price_Action_Reaction_Strategy":
+        # الاستراتيجية الحالية: أسفل شمعة رد الفعل
         last_candle_low = df.iloc[-1]['low']
-        stop_loss = last_candle_low * 0.998 
+        stop_loss = last_candle_low * 0.998 # هامش 0.2% أسفل القاع
+    
+    elif strategy_name == "Extreme_Fade_BB_Strategy":
+        # استراتيجية الفيديو الجديدة: أسفل قاع شمعة الإشارة أو شمعة التأكيد
+        signal_candle_low = df.iloc[-2]['low']
+        confirmation_candle_low = df.iloc[-1]['low']
+        swing_low = min(signal_candle_low, confirmation_candle_low)
+        stop_loss = swing_low * 0.997 # هامش 0.3%
+        
+    else:
+        # حالة افتراضية (لا يجب أن تحدث)
+        logger.warning(f"[{df.name}] Unknown strategy '{strategy_name}' for SL. Using ATR.")
+        atr_val = df.iloc[-1].get('atr', entry_price * 0.01)
+        stop_loss = entry_price - (atr_val * 2.0)
 
     
     # فلتر أمان: تأكد من أن الوقف ليس بعيداً جداً (بحد أقصى 3%)
     max_stop_distance = entry_price * 0.03
-    if entry_price - stop_loss > max_stop_distance:
+    if (entry_price - stop_loss) > max_stop_distance:
         stop_loss = entry_price - max_stop_distance
     
     # فلتر أمان: تأكد من أن الوقف ليس قريباً جداً (بحد أدنى 0.5%)
     min_stop_distance = entry_price * 0.005
-    if entry_price - stop_loss < min_stop_distance:
+    if (entry_price - stop_loss) < min_stop_distance:
         stop_loss = entry_price - min_stop_distance
     
     return stop_loss
@@ -1103,9 +1088,8 @@ def calculate_smart_take_profit(
     strategy_name: str
 ) -> Tuple[float, float]:
     """
-    حساب أهداف الربح بناءً على استراتيجية الفيديو:
-    نسبة مخاطرة/عائد 1:2 و 1:3
-    (هذه الدالة متوافقة مع الاستراتيجية الجديدة ولا تحتاج تعديل)
+    حساب أهداف الربح بناءً على نسبة المخاطرة/العائد (R:R)
+    (هذه الدالة عامة وتناسب جميع الاستراتيجيات)
     """
     risk_amount = entry_price - stop_loss
     if risk_amount <= 0: 
@@ -1114,7 +1098,7 @@ def calculate_smart_take_profit(
     
     # الهدف الأول: نسبة 1:2
     rr1 = 2.0
-    # الهدف الثاني: نسبة 1:3 (امتداد منطقي)
+    # الهدف الثاني: نسبة 1:3
     rr2 = 3.0
     
     target1 = entry_price + (risk_amount * rr1)
@@ -1122,7 +1106,7 @@ def calculate_smart_take_profit(
     
     return (target1, target2)
 
-# ===== END OF NEW STRATEGY BLOCK =====
+# ===== END OF STRATEGY BLOCK =====
 
 
 def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
@@ -1359,7 +1343,6 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_key: str, mtf_tr
         log_rejection(symbol, "Smart Risk/Reward Filter Failed")
         return
 
-    # بما أننا LONG-Only، نتحقق فقط من هذا الشرط
     if stop_loss_price >= entry_price:
         log_rejection(symbol, "Invalid Position Size", {"entry": entry_price, "sl": stop_loss_price})
         return
@@ -1395,7 +1378,6 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_key: str, mtf_tr
         try:
             formatted_quantity = get_formatted_quantity(symbol, quantity_dec)
             logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {formatted_quantity} of {symbol}")
-            # البوت ينفذ شراء فقط (LONG-Only)
             order = client.create_order(
                 symbol=symbol, 
                 side=Client.SIDE_BUY, 
@@ -1461,7 +1443,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V36.0.0 4H Range)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V36.0.0 Dual)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1528,7 +1510,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V36.0.0 (4H Range)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V36.0.0 (استراتيجية مزدوجة)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1935,7 +1917,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V36.0.0 4H Range)</title>
+<title>الإعدادات - بوت 5 دقائق (V36.0.0 Dual)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2671,38 +2653,10 @@ def backtest_strategy(strategy_name, symbol, days=90):
         return {"error": f"Strategy '{strategy_name}' not found."}
     
     dummy_mtf = {'5m': 'bullish', '15m': 'bullish', '1h': 'bullish'}
-    
-    # ===== MODIFICATION: Backtest needs daily range =====
-    current_backtest_range = None
-    current_backtest_date = None
-    
-    df_4h_full = fetch_historical_data(symbol, '4h', days=days+1)
-    if df_4h_full is None:
-        return {"error": "Failed to fetch 4H data for backtest."}
-    # ====================================================
 
     for i in range(200, len(df)):
         current_candle = df.iloc[i]
-        current_date = current_candle.name.date()
         
-        # ===== MODIFICATION: Update 4H range for backtest =====
-        if current_date != current_backtest_date:
-            df_4h_today = df_4h_full[df_4h_full.index.date == current_date]
-            if not df_4h_today.empty:
-                first_candle_of_day = df_4h_today.iloc[0]
-                current_backtest_range = {
-                    'high': float(first_candle_of_day['high']),
-                    'low': float(first_candle_of_day['low']),
-                    'date': current_date
-                }
-                current_backtest_date = current_date
-            else:
-                current_backtest_range = None # No range for this day yet
-        
-        if not current_backtest_range:
-            continue # Skip if no 4h range is available for the day
-        # ======================================================
-
         if active_trade:
             exit_price = None
             exit_reason = None
@@ -2730,12 +2684,16 @@ def backtest_strategy(strategy_name, symbol, days=90):
                 active_trade = None
 
         if not active_trade:
-            df_slice = df.iloc[:i]
+            df_slice = df.iloc[:i+1] # نمرر البيانات حتى الشمعة الحالية
             df_slice.name = symbol # تعيين اسم الرمز للوحة البيانات
             
-            # تمرير النطاق إلى دالة التحقق
-            if check_strategy(df_slice, dummy_mtf, current_backtest_range):
-                entry_price = current_candle['open'] # الدخول عند الافتتاح التالي
+            # --- تعديل: يجب أن يتم الفحص على الشمعة المغلقة (i) ---
+            # --- ولكن استراتيجياتنا تعتمد على الشمعة الأخيرة (i) ---
+            # --- لذا سنستخدم df_slice كما هي ---
+            
+            if check_strategy(df_slice, dummy_mtf):
+                # الدخول عند إغلاق الشمعة (i)
+                entry_price = current_candle['close'] 
                 sl = calculate_smart_stop_loss(df_slice, entry_price, strategy_name)
                 tp1, tp2 = calculate_smart_take_profit(df_slice, entry_price, sl, strategy_name)
                 
@@ -2799,7 +2757,6 @@ def get_mtf_trend(symbol: str) -> Dict[str, str]:
             
     return trends
     
-# ===== MODIFICATION: Main Loop Updated =====
 def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop (5-minute cycle)...")
     while True:
@@ -2832,18 +2789,8 @@ def main_bot_loop():
                     if symbol in open_signals_cache:
                         continue
                 
-                # --- 1. الحصول على نطاق الـ 4 ساعات اليومي ---
-                daily_range = update_daily_4h_range(symbol)
-                if not daily_range:
-                    # لا تسجل الرفض إذا كان النطاق غير متاح بعد (مثل بداية اليوم)
-                    if datetime.now(timezone.utc).hour > 1: # لا تسجل الرفض في أول ساعة من اليوم
-                         log_rejection(symbol, "4H Range Not Found")
-                    continue
-                
-                # --- 2. الحصول على اتجاهات الإطارات المتعددة ---
                 mtf_trend = get_mtf_trend(symbol)
 
-                # --- 3. الحصول على بيانات 5 دقائق ---
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df is None or len(df) < 200:
                     if df is not None: log_rejection(symbol, "Insufficient Historical Data")
@@ -2852,8 +2799,7 @@ def main_bot_loop():
                 df_featured = calculate_all_features(df)
                 df_featured.name = symbol
                 
-                # --- 4. البحث عن استراتيجية (تمرير النطاق اليومي) ---
-                strategy_found_tuple = find_best_strategy(df_featured, mtf_trend, symbol, daily_range)
+                strategy_found_tuple = find_best_strategy(df_featured, mtf_trend, symbol)
 
                 if strategy_found_tuple:
                     strategy_key, strategy_name_ar = strategy_found_tuple
@@ -2863,7 +2809,6 @@ def main_bot_loop():
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
-# ==========================================
 
 def update_signal_in_db(signal_id, updates):
     if not (check_db_connection() and conn): return False
@@ -2977,7 +2922,6 @@ def trade_management_loop():
                 tp2 = float(signal.get('target_price_2', 0))
                 initial_quantity = float(signal.get('initial_quantity', 0))
                 
-                # بما أننا LONG-Only، فإن منطق الإدارة هذا صحيح
                 if stop_loss and current_price <= stop_loss: close_signal(signal, stop_loss, "SL_HIT"); continue
                 if tp2 and current_price >= tp2: close_signal(signal, tp2, "TP2_HIT"); continue
                 
@@ -3037,7 +2981,7 @@ def update_market_state():
     global current_market_state
     try:
         btc_df = fetch_historical_data(BTC_SYMBOL, '1h', days=10)
-        if btc_df is None or len(df) < 200:
+        if btc_df is None or len(btc_df) < 200:
             logger.warning("[Market State] Insufficient BTC data"); return
         btc_df = calculate_all_features(btc_df)
         last_btc = btc_df.iloc[-1]
@@ -3092,7 +3036,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V36.0.0 (4H Range Strategy) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V36.0.0 (Dual Strategy) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
