@@ -3074,18 +3074,143 @@ if __name__ == '__main__':
 
 
 # ------------------ BEGIN BB + STOCH STRATEGY INSERT (5m) ------------------
-# (تمت إضافة هذه الكتلة تلقائياً: Bollinger Bands (20,2) + Stochastic (9,5,5))
-# تحتفظ هذه الكتلة بالاسماء والدوال الأساسية بحيث تستبدل أو تتجاوز الاستراتيجيات السابقة
+# استراتيجية Bollinger Bands (20,2) + Stochastic (9,5,5) لفريم 5 دقائق
+
+import numpy as np
+import pandas as pd
 import warnings
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-try:
-    import numpy as np
-    import pandas as pd
-except Exception:
-    # إذا كانت المكتبات غير متوفرة، فـ raise ليتعامل معها المستخدم عند تشغيل البوت
-    raise
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
-    \"\"\"تحسب المؤشرات المطلوبة: Bollinger (20,2) و Stochastic (9,5,5) بالإضافة إلى مؤشرات مساعدة.\"\"\"\n    df_calc = df.copy()\n\n    # مؤشرات متحركة بسيطة وموسعة (احتياط)\n    df_calc['sma7'] = df_calc['close'].rolling(window=7).mean()\n    df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()\n    df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()\n\n    # ATR\n    high_low = df_calc['high'] - df_calc['low']\n    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()\n    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()\n    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)\n    df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()\n\n    # Bollinger Bands (20, 2)\n    bb_mid = df_calc['close'].rolling(window=20).mean()\n    bb_std = df_calc['close'].rolling(window=20).std()\n    df_calc['bb_middle'] = bb_mid\n    df_calc['bb_upper'] = bb_mid + (bb_std * 2)\n    df_calc['bb_lower'] = bb_mid - (bb_std * 2)\n    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, np.nan)\n\n    # MACD (محفوظ)\n    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()\n    exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()\n    df_calc['macd'] = exp1 - exp2\n    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()\n    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']\n\n    # Stochastic 9,5,5\n    low_n = df_calc['low'].rolling(window=9).min()\n    high_n = df_calc['high'].rolling(window=9).max()\n    denom = (high_n - low_n).replace(0, np.nan)\n    stoch_k_raw = 100 * ((df_calc['close'] - low_n) / denom)\n    df_calc['stoch_k'] = stoch_k_raw.rolling(window=5).mean().fillna(50)\n    df_calc['stoch_d'] = df_calc['stoch_k'].rolling(window=5).mean().fillna(50)\n\n    # VWAP\n    if 'volume' in df_calc.columns:\n        df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum().replace(0, np.nan)\n    else:\n        df_calc['vwap'] = df_calc['close']\n\n    return df_calc\n\n\ndef check_bb_stochastic_strategy(df: pd.DataFrame, mtf_trend: dict = None) -> dict:\n    \"\"\"تفحص آخر شمعات وتعيد قاموسًا يحتوي على نوع الإشارة ('long'/'short'/None) ومعلومات إضافية.\"\"\"\n    res = {'signal': None, 'info': ''}\n    if df is None or len(df) < 22:\n        res['info'] = 'insufficient_data'\n        return res\n    last = df.iloc[-1]\n\n    for col in ('bb_lower', 'bb_upper', 'stoch_k'):\n        if col not in df.columns:\n            res['info'] = f'missing_column_{col}'\n            return res\n\n    open_p = last['open']\n    close_p = last['close']\n    stoch_k = last['stoch_k']\n    bb_lower = last['bb_lower']\n    bb_upper = last['bb_upper']\n\n    body_below_lower = (open_p < bb_lower) and (close_p < bb_lower)\n    body_above_upper = (open_p > bb_upper) and (close_p > bb_upper)\n\n    stoch_oversold = stoch_k < 20\n    stoch_overbought = stoch_k > 80\n\n    if body_below_lower and stoch_oversold:\n        res['signal'] = 'long'\n        res['info'] = f'body_below_lower stoch_k={stoch_k:.2f}'\n        return res\n    if body_above_upper and stoch_overbought:\n        res['signal'] = 'short'\n        res['info'] = f'body_above_upper stoch_k={stoch_k:.2f}'\n        return res\n\n    res['info'] = 'no_signal'\n    return res\n\n\n# استبدال أو تعريف قاموس الاستراتيجيات النهائي\nSTRATEGIES = {\n    'BB_Stochastic_Strategy': {\n        'name': 'BB + Stochastic (5m)',\n        'function': check_bb_stochastic_strategy,\n        'enabled': True,\n        'timeframe': '5m',\n        'notes': 'Bollinger Bands 20,2 + Stochastic 9,5,5. Use as reversal zone indicator.'\n    }\n}\n\n# دوال مساعدة لحساب وقف الخسارة وأهداف الربح\n\ndef calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, side: str = 'long') -> float:\n    last = df.iloc[-1]\n    prev = df.iloc[-2] if len(df) >= 2 else last\n    if side == 'long':\n        swing_low = min(prev['low'], last['low'])\n        sl = swing_low * 0.997\n        if sl >= entry_price:\n            sl = entry_price - (entry_price * 0.005)\n    else:\n        swing_high = max(prev['high'], last['high'])\n        sl = swing_high * 1.003\n        if sl <= entry_price:\n            sl = entry_price + (entry_price * 0.005)\n    # قيد المسافة القصوى\n    max_stop = abs(entry_price) * 0.03\n    if side == 'long' and (entry_price - sl) > max_stop:\n        sl = entry_price - max_stop\n    if side == 'short' and (sl - entry_price) > max_stop:\n        sl = entry_price + max_stop\n    return sl\n\n\ndef calculate_smart_take_profit(entry_price: float, stop_loss: float, side: str = 'long') -> tuple:\n    risk = abs(entry_price - stop_loss)\n    if risk == 0:\n        return (entry_price * 1.02, entry_price * 1.03)\n    if side == 'long':\n        return (entry_price + 2*risk, entry_price + 3*risk)\n    else:\n        return (entry_price - 2*risk, entry_price - 3*risk)\n\n# ------------------ END BB + STOCH STRATEGY INSERT ------------------\n
+    """تحسب المؤشرات المطلوبة: Bollinger (20,2) و Stochastic (9,5,5) بالإضافة إلى مؤشرات مساعدة."""
+    df_calc = df.copy()
+
+    # مؤشرات متحركة بسيطة
+    df_calc['sma7'] = df_calc['close'].rolling(window=7).mean()
+    df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()
+    df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
+
+    # ATR
+    high_low = df_calc['high'] - df_calc['low']
+    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
+    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
+    df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()
+
+    # Bollinger Bands (20, 2)
+    bb_mid = df_calc['close'].rolling(window=20).mean()
+    bb_std = df_calc['close'].rolling(window=20).std()
+    df_calc['bb_middle'] = bb_mid
+    df_calc['bb_upper'] = bb_mid + (bb_std * 2)
+    df_calc['bb_lower'] = bb_mid - (bb_std * 2)
+    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, np.nan)
+
+    # MACD
+    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
+    df_calc['macd'] = exp1 - exp2
+    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
+    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+
+    # Stochastic 9,5,5
+    low_n = df_calc['low'].rolling(window=9).min()
+    high_n = df_calc['high'].rolling(window=9).max()
+    denom = (high_n - low_n).replace(0, np.nan)
+    stoch_k_raw = 100 * ((df_calc['close'] - low_n) / denom)
+    df_calc['stoch_k'] = stoch_k_raw.rolling(window=5).mean().fillna(50)
+    df_calc['stoch_d'] = df_calc['stoch_k'].rolling(window=5).mean().fillna(50)
+
+    # VWAP
+    if 'volume' in df_calc.columns:
+        df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum().replace(0, np.nan)
+    else:
+        df_calc['vwap'] = df_calc['close']
+
+    return df_calc
+
+
+def check_bb_stochastic_strategy(df: pd.DataFrame, mtf_trend: dict = None) -> dict:
+    """تفحص آخر شمعة وتعيد نوع الإشارة ('long'/'short'/None)"""
+    res = {'signal': None, 'info': ''}
+    if df is None or len(df) < 22:
+        res['info'] = 'insufficient_data'
+        return res
+
+    last = df.iloc[-1]
+
+    for col in ('bb_lower', 'bb_upper', 'stoch_k'):
+        if col not in df.columns:
+            res['info'] = f'missing_column_{col}'
+            return res
+
+    open_p = last['open']
+    close_p = last['close']
+    stoch_k = last['stoch_k']
+    bb_lower = last['bb_lower']
+    bb_upper = last['bb_upper']
+
+    body_below_lower = (open_p < bb_lower) and (close_p < bb_lower)
+    body_above_upper = (open_p > bb_upper) and (close_p > bb_upper)
+
+    stoch_oversold = stoch_k < 20
+    stoch_overbought = stoch_k > 80
+
+    if body_below_lower and stoch_oversold:
+        res['signal'] = 'long'
+        res['info'] = f'body_below_lower stoch_k={stoch_k:.2f}'
+        return res
+    if body_above_upper and stoch_overbought:
+        res['signal'] = 'short'
+        res['info'] = f'body_above_upper stoch_k={stoch_k:.2f}'
+        return res
+
+    res['info'] = 'no_signal'
+    return res
+
+
+STRATEGIES = {
+    'BB_Stochastic_Strategy': {
+        'name': 'BB + Stochastic (5m)',
+        'function': check_bb_stochastic_strategy,
+        'enabled': True,
+        'timeframe': '5m',
+        'notes': 'Bollinger Bands 20,2 + Stochastic 9,5,5.'
+    }
+}
+
+
+def calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, side: str = 'long') -> float:
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+    if side == 'long':
+        swing_low = min(prev['low'], last['low'])
+        sl = swing_low * 0.997
+        if sl >= entry_price:
+            sl = entry_price - (entry_price * 0.005)
+    else:
+        swing_high = max(prev['high'], last['high'])
+        sl = swing_high * 1.003
+        if sl <= entry_price:
+            sl = entry_price + (entry_price * 0.005)
+    max_stop = abs(entry_price) * 0.03
+    if side == 'long' and (entry_price - sl) > max_stop:
+        sl = entry_price - max_stop
+    if side == 'short' and (sl - entry_price) > max_stop:
+        sl = entry_price + max_stop
+    return sl
+
+
+def calculate_smart_take_profit(entry_price: float, stop_loss: float, side: str = 'long') -> tuple:
+    risk = abs(entry_price - stop_loss)
+    if risk == 0:
+        return (entry_price * 1.02, entry_price * 1.03)
+    if side == 'long':
+        return (entry_price + 2*risk, entry_price + 3*risk)
+    else:
+        return (entry_price - 2*risk, entry_price - 3*risk)
+
+# ------------------ END BB + STOCH STRATEGY INSERT ------------------
+
