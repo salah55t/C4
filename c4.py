@@ -814,122 +814,299 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     return True
     
+# ===== STRATEGIES BLOCK =====
 
-# ===== REPLACED STRATEGIES BLOCK (Inserted by assistant) =====
-# مكتبة الاستراتيجيات الجديدة (TradingStrategies) + دوال فحص الإشارات المحدثة
-import ephem
-import numpy as np
-import pandas as pd
-from typing import Dict, List, Tuple
-
-class TradingStrategies:
-    \"\"\"
-    مكتبة شاملة لاستراتيجيات التداول (مضمنة لاستبدال استراتيجيات الإشارة فقط)
-    \"\"\"
-
-    @staticmethod
-    def fibonacci_retracement(high: float, low: float, is_uptrend: bool = True) -> Dict[str, float]:
-        diff = high - low
-        levels = {
-            '0%': high if is_uptrend else low,
-            '23.6%': high - (diff * 0.236) if is_uptrend else low + (diff * 0.236),
-            '38.2%': high - (diff * 0.382) if is_uptrend else low + (diff * 0.382),
-            '50%': high - (diff * 0.5) if is_uptrend else low + (diff * 0.5),
-            '61.8%': high - (diff * 0.618) if is_uptrend else low + (diff * 0.618),
-            '78.6%': high - (diff * 0.786) if is_uptrend else low + (diff * 0.786),
-            '100%': low if is_uptrend else high
-        }
-        return levels
-
-    @staticmethod
-    def fair_value_gap(open_prices: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series) -> List[Dict]:
-        fvgs = []
-        for i in range(2, len(open_prices)):
-            if (low.iloc[i] > high.iloc[i-2] and close.iloc[i] > close.iloc[i-1]):
-                fvgs.append({'index': i, 'type': 'bullish', 'top': low.iloc[i], 'bottom': high.iloc[i-2]})
-            elif (high.iloc[i] < low.iloc[i-2] and close.iloc[i] < close.iloc[i-1]):
-                fvgs.append({'index': i, 'type': 'bearish', 'top': low.iloc[i-2], 'bottom': high.iloc[i]})
-        return fvgs
-
-    @staticmethod
-    def detect_hammer(open_prices: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series) -> List[Dict]:
-        hammers = []
-        for i in range(len(open_prices)):
-            body = abs(close.iloc[i] - open_prices.iloc[i])
-            lower_shadow = min(open_prices.iloc[i], close.iloc[i]) - low.iloc[i]
-            upper_shadow = high.iloc[i] - max(open_prices.iloc[i], close.iloc[i])
-            if (lower_shadow > body * 2 and upper_shadow < body * 0.3 and body > 0):
-                hammers.append({'index': i, 'type': 'hammer', 'bullish': close.iloc[i] > open_prices.iloc[i]})
-        return hammers
-
-    @staticmethod
-    def detect_engulfing(open_prices: pd.Series, close: pd.Series) -> List[Dict]:
-        patterns = []
-        for i in range(1, len(open_prices)):
-            prev_body = abs(close.iloc[i-1] - open_prices.iloc[i-1])
-            curr_body = abs(close.iloc[i] - open_prices.iloc[i])
-            if (close.iloc[i-1] < open_prices.iloc[i-1] and close.iloc[i] > open_prices.iloc[i] and open_prices.iloc[i] <= close.iloc[i-1] and close.iloc[i] > open_prices.iloc[i-1]):
-                patterns.append({'index': i, 'type': 'bullish_engulfing'})
-        return patterns
-
-    @staticmethod
-    def market_structure(highs: pd.Series, lows: pd.Series) -> Dict:
-        peaks, troughs = [], []
-        for i in range(1, len(highs)-1):
-            if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
-                peaks.append((i, highs.iloc[i]))
-        for i in range(1, len(lows)-1):
-            if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
-                troughs.append((i, lows.iloc[i]))
-        trend = 'neutral'
-        if len(peaks) >= 2 and len(troughs) >= 2:
-            if peaks[-1][1] > peaks[-2][1] and troughs[-1][1] > troughs[-2][1]:
-                trend = 'uptrend'
-            elif peaks[-1][1] < peaks[-2][1] and troughs[-1][1] < troughs[-2][1]:
-                trend = 'downtrend'
-        return {'trend': trend}
-
-def check_strategy_fibonacci_reaction(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    # يستخدم مستويات فيبوناتشي ويدعم بانتقال شموع (مطرقة/ابتلاعية)
-    if len(df) < 30:
+# --- STRATEGY 1: Price Action Reaction (Existing) ---
+def check_price_action_reaction_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية رد الفعل السعري (من الفيديو السابق)
+    تبحث عن رد فعل (شمعة صاعدة) عند مستوى دعم واضح (قاع سابق).
+    """
+    if len(df) < 50:
         return False
-    highs, lows, close = df['high'], df['low'], df['close']
-    recent_high, recent_low = highs.tail(50).max(), lows.tail(50).min()
-    is_uptrend = recent_high - close.iloc[-1] > 0
-    levels = TradingStrategies.fibonacci_retracement(recent_high, recent_low, is_uptrend)
-    last_close = close.iloc[-1]
-    close_to_level = any(abs(last_close - v) / v <= 0.006 for v in levels.values())
-    if not close_to_level:
-        return False
-    hammers = TradingStrategies.detect_hammer(df['open'], df['high'], df['low'], df['close'])
-    engulf = TradingStrategies.detect_engulfing(df['open'], df['close'])
-    if hammers and hammers[-1]['index'] == len(df)-1:
-        return True
-    if engulf and engulf[-1]['index'] == len(df)-1:
-        return True
-    return False
 
-def check_strategy_fvg_and_structure(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    if len(df) < 30:
+    last = df.iloc[-1]
+    
+    # 1. تحديد مستوى الدعم (أدنى قاع في آخر 30 شمعة)
+    lookback_period = 30
+    recent_lows_df = df.tail(lookback_period)
+    
+    support_indices = argrelextrema(recent_lows_df['low'].values, np.less_equal, order=3)[0]
+    
+    if len(support_indices) == 0:
+        recent_support_level = recent_lows_df['low'].min()
+    else:
+        recent_support_level = recent_lows_df.iloc[support_indices]['low'].min()
+
+    if pd.isna(recent_support_level):
+        log_rejection(df.name, "No Support Level Found")
         return False
-    fvgs = TradingStrategies.fair_value_gap(df['open'], df['high'], df['low'], df['close'])
-    if not fvgs:
+
+    # 2. التحقق من لمس السعر لمستوى الدعم
+    touched_support = (last['low'] <= recent_support_level * 1.003) or \
+                      (df.iloc[-2]['low'] <= recent_support_level * 1.003)
+
+    if not touched_support:
+        # log_rejection(df.name, "Price Did Not Hit Support", {"low": last['low'], "support": recent_support_level})
         return False
-    last_fvg = fvgs[-1]
-    if last_fvg['type'] != 'bullish':
+
+    # 3. التحقق من "رد الفعل" (شمعة صاعدة قوية / شمعة رفض)
+    candle_range = last['high'] - last['low']
+    if candle_range == 0: 
+        log_rejection(df.name, "No Reaction Candle", {"reason": "Doji candle"})
         return False
-    if df['close'].iloc[-1] > last_fvg['top']:
-        ms = TradingStrategies.market_structure(df['high'], df['low'])
-        if ms['trend'] in ('uptrend', 'neutral'):
-            return True
-    return False
+
+    is_bullish = last['close'] > last['open']
+    is_rejection = (last['close'] - last['low']) / candle_range > 0.5 
+
+    if not (is_bullish and is_rejection):
+        log_rejection(df.name, "No Reaction Candle", {"reason": "Not bullish or not rejection"})
+        return False
+
+    # 4. فلتر اتجاه بسيط
+    if not (last['ema21'] > last['ema50']):
+        log_rejection(df.name, "Against Trend", {"reason": "EMA21 < EMA50"})
+        return False
+        
+    # 5. فلتر حجم تداول
+    volume_ma = df['volume'].rolling(20).mean().iloc[-1]
+    if not last['volume'] > volume_ma * 0.8: 
+        log_rejection(df.name, "Low Quality Signal", {"reason": "Low volume on reaction"})
+        return False
+
+    logger.info(f"✅ [{df.name}] Price Action Strategy Triggered at support {recent_support_level:.4f}")
+    return True
+
+# --- NEW: STRATEGY 2: Extreme Fade (From Video) ---
+def check_extreme_fade_bb_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الانعكاس المتطرف (من الفيديو الجديد)
+    تبحث عن إغلاق أسفل 3-SD BB ثم إغلاق تأكيدي أعلى 2-SD BB.
+    (نسخة الشراء فقط)
+    """
+    if len(df) < 21: # (20 for BB + 1 previous candle)
+        return False
+    
+    # Check if new columns exist
+    if 'bb_lower_3sd' not in df.columns or 'bb_lower' not in df.columns:
+        logger.warning(f"[{df.name}] BB 3SD columns not found. Skipping strategy.")
+        return False
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # 1. Signal Candle (Previous Candle)
+    # هل أغلقت الشمعة السابقة عند أو أسفل خط 3-SD؟
+    signal_candle_closed_below_3sd = prev['close'] <= prev['bb_lower_3sd']
+    
+    if not signal_candle_closed_below_3sd:
+        # log_rejection(df.name, "Extreme Fade: Not Below 3SD") # Too noisy to log
+        return False
+
+    # 2. Confirmation Candle (Last/Current Candle)
+    # هل أغلقت الشمعة الحالية مرة أخرى أعلى خط 2-SD؟
+    confirmation_candle_closed_above_2sd = last['close'] > last['bb_lower']
+
+    if not confirmation_candle_closed_above_2sd:
+        log_rejection(df.name, "Extreme Fade: No Confirmation", {"close": last['close'], "bb_lower_2sd": last['bb_lower']})
+        return False
+    
+    # 3. Trend Filter (simple)
+    if not (last['ema50'] > last['ema200']):
+        log_rejection(df.name, "Against Trend", {"reason": "EMA50 < EMA200"})
+        return False
+
+    # 4. Volume Filter
+    volume_ma = df['volume'].rolling(20).mean().iloc[-1]
+    if not last['volume'] > volume_ma * 0.8: 
+        log_rejection(df.name, "Low Quality Signal", {"reason": "Low volume on confirmation"})
+        return False
+        
+    logger.info(f"✅ [{df.name}] Extreme Fade BB Strategy Triggered!")
+    return True
+
+# ===== SMART DYNAMIC FILTERS (Kept but disabled in find_best_strategy) =====
+
+def apply_smart_market_structure_filter(df: pd.DataFrame, symbol: str) -> bool:
+    if len(df) < 50: return False
+    recent_period = df.tail(20)
+    last_candle = recent_period.iloc[-1]
+    avg_high = recent_period['high'].rolling(5).mean().iloc[-1]
+    if last_candle['high'] < avg_high:
+        log_rejection(symbol, "Smart Market Structure Filter Failed", {"reason": "Low High"})
+        return False
+    avg_low = recent_period['low'].rolling(5).mean().iloc[-1]
+    if last_candle['low'] < avg_low:
+        log_rejection(symbol, "Smart Market Structure Filter Failed", {"reason": "Low Low"})
+        return False
+    return True
+
+
+def apply_smart_liquidity_filter(df: pd.DataFrame, symbol: str) -> bool:
+    if len(df) < 20: return False
+    last = df.iloc[-1]; prev = df.iloc[-2]
+    spread_ratio = (last['high'] - last['low']) / last['close']
+    if spread_ratio > 0.05:
+        log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Spread > 5% ({spread_ratio:.2f}%)"})
+        return False
+    volume_std = df['volume'].tail(20).std()
+    volume_mean = df['volume'].tail(20).mean()
+    cv = volume_std / volume_mean if volume_mean > 0 else 999
+    if cv > 2.0:
+        is_bullish_volume_spike = (last['close'] > prev['close']) and (last['volume'] > volume_mean * 1.5)
+        if not is_bullish_volume_spike:
+            log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Volume CV > 2.0 ({cv:.2f})"})
+            return False
+        else: logger.info(f"[{symbol}] Liquidity filter bypassed due to bullish volume spike.")
+    price_changes = df['close'].pct_change().tail(10).abs()
+    max_price_jump = price_changes.max()
+    if max_price_jump > 0.05:
+        log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Price Jump > 5% ({max_price_jump:.2f}%)"})
+        return False
+    return True
+
+
+def apply_smart_risk_reward_filter(entry_price: float, stop_loss: float, target1: float, target2: float) -> bool:
+    risk = entry_price - stop_loss
+    if risk <= 0: return False
+    reward1 = target1 - entry_price
+    reward2 = target2 - entry_price
+    rr1 = reward1 / risk if risk > 0 else 0
+    rr2 = reward2 / risk if risk > 0 else 0
+    if rr1 < 1.9: return False 
+    if rr2 < 2.9: return False
+    if (risk / entry_price) > 0.03: return False
+    return True
+
+
+def calculate_market_regime(df: pd.DataFrame) -> str:
+    if len(df) < 50: return 'unknown'
+    last = df.iloc[-1]
+    adx = last.get('adx', 0)
+    bb_width = last.get('bb_width', 0)
+    bb_width_ma = df['bb_width'].rolling(50).mean().iloc[-1]
+    atr_percent = last.get('atr_percent', 0)
+    if adx > 25 and atr_percent < 2.5: return 'trending'
+    elif adx < 20 and bb_width < bb_width_ma * 0.8: return 'ranging'
+    elif atr_percent > 3.0: return 'volatile'
+    else: return 'mixed'
+
+
+# ===== STRATEGY SELECTOR (Modified) =====
 
 ENHANCED_STRATEGIES = {
-    'Fib_Reaction': {'name': 'Fibonacci Reaction', 'check_function': check_strategy_fibonacci_reaction, 'enabled': True},
-    'FVG_Structure': {'name': 'FVG + Market Structure', 'check_function': check_strategy_fvg_and_structure, 'enabled': True}
+    "Price_Action_Reaction_Strategy": {
+        "name": "استراتيجية رد الفعل السعري (Support)",
+        "check_function": check_price_action_reaction_strategy,
+        "enabled": True, "best_regime": ['trending', 'mixed', 'ranging'], "risk_level": 'medium'
+    },
+    # --- NEW STRATEGY ADDED ---
+    "Extreme_Fade_BB_Strategy": {
+        "name": "استراتيجية الانعكاس المتطرف (BB Video)",
+        "check_function": check_extreme_fade_bb_strategy,
+        "enabled": True, "best_regime": ['ranging', 'mixed'], "risk_level": 'high'
+    }
 }
-# ===== END REPLACED STRATEGIES BLOCK =====
 
+# سيتم تحديث هذا القاموس تلقائياً
+STRATEGY_NAMES = {key: info['name'] for key, info in ENHANCED_STRATEGIES.items()}
+
+
+def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str) -> Optional[Tuple[str, str]]:
+    """
+    يبحث عن أفضل استراتيجية مناسبة للوضع الحالي
+    (تم تعديله ليعمل الآن على استراتيجيتين)
+    """
+    market_regime = calculate_market_regime(df)
+    
+    # --- تم تعطيل الفلاتر المعقدة للتبسيط ---
+    # if not apply_smart_market_structure_filter(df, symbol): return None
+    # if not apply_smart_liquidity_filter(df, symbol): return None
+    # -----------------------------------------------------------------
+    
+    with strategy_filters_lock:
+        strategies_to_check = {k: v for k, v in ENHANCED_STRATEGIES.items()}
+
+    # يتم فحص الاستراتيجيات بالترتيب
+    for strategy_key, strategy_info in strategies_to_check.items():
+        if not strategy_info['enabled']: continue
+        
+        try:
+            if strategy_info['check_function'](df, mtf_trend):
+                return (strategy_key, strategy_info['name'])
+        except Exception as e:
+            logger.error(f"❌ [{symbol}] Error checking strategy {strategy_key}: {e}", exc_info=True)
+            continue
+    
+    return None
+
+
+# ===== MODIFIED: STOP LOSS & TAKE PROFIT (Multi-Strategy) =====
+
+def calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
+    """
+    حساب وقف الخسارة بناءً على الاستراتيجية المحددة.
+    """
+    stop_loss = 0.0
+
+    if strategy_name == "Price_Action_Reaction_Strategy":
+        # الاستراتيجية الحالية: أسفل شمعة رد الفعل
+        last_candle_low = df.iloc[-1]['low']
+        stop_loss = last_candle_low * 0.998 # هامش 0.2% أسفل القاع
+    
+    elif strategy_name == "Extreme_Fade_BB_Strategy":
+        # استراتيجية الفيديو الجديدة: أسفل قاع شمعة الإشارة أو شمعة التأكيد
+        signal_candle_low = df.iloc[-2]['low']
+        confirmation_candle_low = df.iloc[-1]['low']
+        swing_low = min(signal_candle_low, confirmation_candle_low)
+        stop_loss = swing_low * 0.997 # هامش 0.3%
+        
+    else:
+        # حالة افتراضية (لا يجب أن تحدث)
+        logger.warning(f"[{df.name}] Unknown strategy '{strategy_name}' for SL. Using ATR.")
+        atr_val = df.iloc[-1].get('atr', entry_price * 0.01)
+        stop_loss = entry_price - (atr_val * 2.0)
+
+    
+    # فلتر أمان: تأكد من أن الوقف ليس بعيداً جداً (بحد أقصى 3%)
+    max_stop_distance = entry_price * 0.03
+    if (entry_price - stop_loss) > max_stop_distance:
+        stop_loss = entry_price - max_stop_distance
+    
+    # فلتر أمان: تأكد من أن الوقف ليس قريباً جداً (بحد أدنى 0.5%)
+    min_stop_distance = entry_price * 0.005
+    if (entry_price - stop_loss) < min_stop_distance:
+        stop_loss = entry_price - min_stop_distance
+    
+    return stop_loss
+
+
+def calculate_smart_take_profit(
+    df: pd.DataFrame, 
+    entry_price: float, 
+    stop_loss: float, 
+    strategy_name: str
+) -> Tuple[float, float]:
+    """
+    حساب أهداف الربح بناءً على نسبة المخاطرة/العائد (R:R)
+    (هذه الدالة عامة وتناسب جميع الاستراتيجيات)
+    """
+    risk_amount = entry_price - stop_loss
+    if risk_amount <= 0: 
+        # حالة احتياطية إذا كان الوقف غير صالح
+        return (entry_price * 1.02, entry_price * 1.03)
+    
+    # الهدف الأول: نسبة 1:2
+    rr1 = 2.0
+    # الهدف الثاني: نسبة 1:3
+    rr2 = 3.0
+    
+    target1 = entry_price + (risk_amount * rr1)
+    target2 = entry_price + (risk_amount * rr2)
+    
+    return (target1, target2)
+
+# ===== END OF STRATEGY BLOCK =====
 
 
 def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
@@ -3037,3 +3214,119 @@ def calculate_smart_take_profit(entry_price: float, stop_loss: float, side: str 
 
 # ------------------ END BB + STOCH STRATEGY INSERT ------------------
 
+# ============================================================================
+# 🔹 بداية الاستراتيجيات الجديدة (TradingStrategies)
+# ============================================================================
+import ephem
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Tuple
+
+class TradingStrategies:
+    """
+    مكتبة شاملة لاستراتيجيات التداول (نسخة نظيفة ومحدثة)
+    """
+
+    @staticmethod
+    def fibonacci_retracement(high: float, low: float, is_uptrend: bool = True) -> Dict[str, float]:
+        diff = high - low
+        levels = {
+            '0%': high if is_uptrend else low,
+            '23.6%': high - (diff * 0.236) if is_uptrend else low + (diff * 0.236),
+            '38.2%': high - (diff * 0.382) if is_uptrend else low + (diff * 0.382),
+            '50%': high - (diff * 0.5) if is_uptrend else low + (diff * 0.5),
+            '61.8%': high - (diff * 0.618) if is_uptrend else low + (diff * 0.618),
+            '78.6%': high - (diff * 0.786) if is_uptrend else low + (diff * 0.786),
+            '100%': low if is_uptrend else high
+        }
+        return levels
+
+    @staticmethod
+    def fair_value_gap(open_prices: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series) -> List[Dict]:
+        fvgs = []
+        for i in range(2, len(open_prices)):
+            if (low.iloc[i] > high.iloc[i-2] and close.iloc[i] > close.iloc[i-1]):
+                fvgs.append({'index': i, 'type': 'bullish', 'top': low.iloc[i], 'bottom': high.iloc[i-2]})
+            elif (high.iloc[i] < low.iloc[i-2] and close.iloc[i] < close.iloc[i-1]):
+                fvgs.append({'index': i, 'type': 'bearish', 'top': low.iloc[i-2], 'bottom': high.iloc[i]})
+        return fvgs
+
+    @staticmethod
+    def detect_hammer(open_prices: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series) -> List[Dict]:
+        hammers = []
+        for i in range(len(open_prices)):
+            body = abs(close.iloc[i] - open_prices.iloc[i])
+            lower_shadow = min(open_prices.iloc[i], close.iloc[i]) - low.iloc[i]
+            upper_shadow = high.iloc[i] - max(open_prices.iloc[i], close.iloc[i])
+            if (lower_shadow > body * 2 and upper_shadow < body * 0.3 and body > 0):
+                hammers.append({'index': i, 'type': 'hammer', 'bullish': close.iloc[i] > open_prices.iloc[i]})
+        return hammers
+
+    @staticmethod
+    def detect_engulfing(open_prices: pd.Series, close: pd.Series) -> List[Dict]:
+        patterns = []
+        for i in range(1, len(open_prices)):
+            prev_body = abs(close.iloc[i-1] - open_prices.iloc[i-1])
+            curr_body = abs(close.iloc[i] - open_prices.iloc[i])
+            if (close.iloc[i-1] < open_prices.iloc[i-1] and close.iloc[i] > open_prices.iloc[i] and open_prices.iloc[i] <= close.iloc[i-1] and close.iloc[i] > open_prices.iloc[i-1]):
+                patterns.append({'index': i, 'type': 'bullish_engulfing'})
+        return patterns
+
+    @staticmethod
+    def market_structure(highs: pd.Series, lows: pd.Series) -> Dict:
+        peaks, troughs = [], []
+        for i in range(1, len(highs)-1):
+            if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
+                peaks.append((i, highs.iloc[i]))
+        for i in range(1, len(lows)-1):
+            if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
+                troughs.append((i, lows.iloc[i]))
+        trend = 'neutral'
+        if len(peaks) >= 2 and len(troughs) >= 2:
+            if peaks[-1][1] > peaks[-2][1] and troughs[-1][1] > troughs[-2][1]:
+                trend = 'uptrend'
+            elif peaks[-1][1] < peaks[-2][1] and troughs[-1][1] < troughs[-2][1]:
+                trend = 'downtrend'
+        return {'trend': trend}
+
+def check_strategy_fibonacci_reaction(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    if len(df) < 30:
+        return False
+    highs, lows, close = df['high'], df['low'], df['close']
+    recent_high, recent_low = highs.tail(50).max(), lows.tail(50).min()
+    is_uptrend = recent_high - close.iloc[-1] > 0
+    levels = TradingStrategies.fibonacci_retracement(recent_high, recent_low, is_uptrend)
+    last_close = close.iloc[-1]
+    close_to_level = any(abs(last_close - v) / v <= 0.006 for v in levels.values())
+    if not close_to_level:
+        return False
+    hammers = TradingStrategies.detect_hammer(df['open'], df['high'], df['low'], df['close'])
+    engulf = TradingStrategies.detect_engulfing(df['open'], df['close'])
+    if hammers and hammers[-1]['index'] == len(df)-1:
+        return True
+    if engulf and engulf[-1]['index'] == len(df)-1:
+        return True
+    return False
+
+def check_strategy_fvg_and_structure(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    if len(df) < 30:
+        return False
+    fvgs = TradingStrategies.fair_value_gap(df['open'], df['high'], df['low'], df['close'])
+    if not fvgs:
+        return False
+    last_fvg = fvgs[-1]
+    if last_fvg['type'] != 'bullish':
+        return False
+    if df['close'].iloc[-1] > last_fvg['top']:
+        ms = TradingStrategies.market_structure(df['high'], df['low'])
+        if ms['trend'] in ('uptrend', 'neutral'):
+            return True
+    return False
+
+ENHANCED_STRATEGIES = {
+    'Fib_Reaction': {'name': 'Fibonacci Reaction', 'check_function': check_strategy_fibonacci_reaction, 'enabled': True},
+    'FVG_Structure': {'name': 'FVG + Market Structure', 'check_function': check_strategy_fvg_and_structure, 'enabled': True}
+}
+# ============================================================================
+# 🔹 نهاية الاستراتيجيات الجديدة
+# ============================================================================
