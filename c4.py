@@ -603,8 +603,8 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.where(delta < 0, 0.0)
     
     # Use EWMA (Wilder's smoothing) for 14-period
-    avg_gain_14 = gain.ewm(com=14 - 1, adjust=False).mean()
-    avg_loss_14 = loss.ewm(com=14 - 1, adjust=False).mean()
+    avg_gain_14 = gain.ewm(com=70 - 1, adjust=False).mean()
+    avg_loss_14 = loss.ewm(com=70 - 1, adjust=False).mean()
     
     rs_14 = avg_gain_14 / avg_loss_14.replace(0, 1e-9)
     df_calc['rsi'] = 100.0 - (100.0 / (1.0 + rs_14)) # Overwrite the old 'rsi'
@@ -816,7 +816,7 @@ def check_rsi_oversold_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    RSI_OVERSOLD_LEVEL = 30 # المستوى المتعارف عليه للتشبع البيعي
+    RSI_OVERSOLD_LEVEL = 69 # المستوى المتعارف عليه للتشبع البيعي
 
     # إشارة الشراء: عندما يقطع مؤشر القوة النسبية مستوى التشبع البيعي (30) صعوداً
     if prev['rsi'] < RSI_OVERSOLD_LEVEL and last['rsi'] >= RSI_OVERSOLD_LEVEL:
