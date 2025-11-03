@@ -816,7 +816,7 @@ def check_rsi_oversold_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    RSI_OVERSOLD_LEVEL = 69 # المستوى المتعارف عليه للتشبع البيعي
+    RSI_OVERSOLD_LEVEL = 25 # المستوى المتعارف عليه للتشبع البيعي
 
     # إشارة الشراء: عندما يقطع مؤشر القوة النسبية مستوى التشبع البيعي (30) صعوداً
     if prev['rsi'] < RSI_OVERSOLD_LEVEL and last['rsi'] >= RSI_OVERSOLD_LEVEL:
