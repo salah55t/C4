@@ -1,10 +1,11 @@
-# ملف c4_rsi_strategy.py - (نسخة V34.1.0 معدلة)
+# ملف c4_rsi_strategy.py - (نسخة V34.1.1 معدلة)
 # --- وصف التعديلات:
 # 1. [الاستراتيجية الجديدة] تم استبدال جميع استراتيجيات التداول السابقة باستراتيجية واحدة جديدة.
 # 2. [استراتيجية RSI] الاستراتيجية الجديدة تعتمد حصرياً على مؤشر القوة النسبية (RSI) بإعدادات 14 فترة.
 # 3. [إشارة الشراء] يتم توليد إشارة شراء عندما يقطع مؤشر RSI مستوى التشبع البيعي (30) صعوداً.
 # 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام (Flask, DB, WS).
 # 5. [تعديل الواجهة] تم إزالة خيارات تفعيل/إلغاء الاستراتيجيات المتعددة من صفحة الإعدادات.
+# 6. [تحديث الاستراتيجية] تم تحديث استراتيجية RSI لتشمل فلاتر الاتجاه (EMA21) والحجم (Volume MA).
 
 import time
 import os
@@ -99,7 +100,7 @@ min_quality_lock = Lock()
 
 # --- مفاتيح تفعيل الاستراتيجيات (الآن استراتيجية واحدة فقط) ---
 STRATEGY_NAMES = {
-    "RSI_Oversold_Strategy": "RSI Oversold (شراء التشبع البيعي)"
+    "RSI_Enhanced_Strategy": "RSI Enhanced (RSI مُحسّن)"
 }
 strategy_filters_lock = Lock()
 
@@ -144,7 +145,8 @@ REJECTION_REASONS_AR = {
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
 
     # Strategy Specific Rejections (Now simplified)
-    "RSI: Ignored signal in bearish trend": "RSI: تم تجاهل الإشارة بسبب اتجاه هابط قوي"
+    "RSI: Ignored signal in bearish trend": "RSI: تم تجاهل الإشارة بسبب اتجاه هابط قوي",
+    "RSI: Ignored signal in bearish trend (below EMA21)": "RSI: تم تجاهل الإشارة (تحت EMA21)"
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -603,8 +605,8 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.where(delta < 0, 0.0)
     
     # Use EWMA (Wilder's smoothing) for 14-period
-    avg_gain_14 = gain.ewm(com=70 - 1, adjust=False).mean()
-    avg_loss_14 = loss.ewm(com=70 - 1, adjust=False).mean()
+    avg_gain_14 = gain.ewm(com=14 - 1, adjust=False).mean()
+    avg_loss_14 = loss.ewm(com=14 - 1, adjust=False).mean()
     
     rs_14 = avg_gain_14 / avg_loss_14.replace(0, 1e-9)
     df_calc['rsi'] = 100.0 - (100.0 / (1.0 + rs_14)) # Overwrite the old 'rsi'
@@ -773,7 +775,7 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
     
     stop_loss = entry_price - (atr_value * 2.0) # قيمة افتراضية
     
-    if strategy_name == "RSI_Oversold_Strategy":
+    if strategy_name == "RSI_Enhanced_Strategy": # تم تحديث الاسم
         # استخدام ATR كمحدد لوقف الخسارة لاستراتيجية الارتداد
         recent_low = df['low'].tail(5).min()
         stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.8))
@@ -792,7 +794,7 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.025) # Default for 5m
 
     # Risk-Reward Ratios adjusted for 5m timeframe (Scalping)
-    if strategy_name == "RSI_Oversold_Strategy": rr1, rr2 = 1.8, 3.0 # نسب جيدة لاستراتيجية ارتداد
+    if strategy_name == "RSI_Enhanced_Strategy": rr1, rr2 = 1.8, 3.0 # نسب جيدة لاستراتيجية ارتداد (تم تحديث الاسم)
     else: rr1, rr2 = 1.6, 2.8
         
     target1 = entry_price + (risk_amount * rr1)
@@ -805,30 +807,35 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
 # تم حذف جميع دوال الاستراتيجيات السابقة
 # (check_ema_rsi_strategy_enhanced, check_bb_stoch_strategy_enhanced, etc.)
 
-def check_rsi_oversold_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+# --- [التحديث] تم استبدال الدالة القديمة بالدالة الجديدة ---
+def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
-    استراتيجية الشراء عند التشبع البيعي لـ RSI.
-    تولد إشارة شراء عندما يقطع مؤشر RSI (بفترة 14) مستوى 30 صعوداً.
+    استراتيجية RSI المُحسّنة: تتطلب تأكيداً من الاتجاه والحجم.
     """
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50: return False # نتأكد أن لدينا بيانات كافية لحساب RSI 14
+    if len(df) < 50: 
+        return False
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    RSI_OVERSOLD_LEVEL = 25 # المستوى المتعارف عليه للتشبع البيعي
-
-    # إشارة الشراء: عندما يقطع مؤشر القوة النسبية مستوى التشبع البيعي (30) صعوداً
-    if prev['rsi'] < RSI_OVERSOLD_LEVEL and last['rsi'] >= RSI_OVERSOLD_LEVEL:
-        
-        # (اختياري) يمكن إضافة فلتر للاتجاه هنا، لكن الطلب كان RSI فقط
-        # if mtf_trend.get('15m') == 'bearish':
-        #     log_rejection(symbol_name, "RSI: Ignored signal in bearish trend")
-        #     return False
-            
-        logger.info(f"✅ [RSI Signal] {symbol_name}: RSI crossed up {RSI_OVERSOLD_LEVEL} ({prev['rsi']:.1f} -> {last['rsi']:.1f})")
-        return True
+    # 1. شرط إشارة RSI الأساسية (الارتداد من تحت 30)
+    rsi_signal = prev['rsi'] < 30 and last['rsi'] >= 30
     
+    # 2. فلتر الاتجاه: يجب أن يكون السعر فوق المتوسط المتحرك الأسي (EMA) لمدة 21
+    # هذا يتجنب الشراء في اتجاه هابط قوي
+    trend_filter = last['close'] > last['ema21']
+    
+    # 3. فلتر الحجم: يجب أن يكون حجم التداول الحالي أعلى من المتوسط
+    # هذا يؤكد أن هناك زخماً خلف الارتداد
+    volume_filter = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.2
+
+    if rsi_signal and trend_filter and volume_filter:
+        logger.info(f"✅ [Enhanced RSI Signal] All conditions met.")
+        return True
+        
+    if rsi_signal and not trend_filter:
+        log_rejection(df.name if hasattr(df, 'name') else 'Unknown', "RSI: Ignored signal in bearish trend (below EMA21)")
+        
     return False
 # --- نهاية الاستراتيجية ---
 
@@ -1077,7 +1084,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V34.1.0)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V34.1.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1144,7 +1151,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V34.1.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V34.1.1</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1550,7 +1557,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V34.1.0)</title>
+<title>الإعدادات - بوت 5 دقائق (V34.1.1)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2162,7 +2169,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
     backtest_trade_amount = 10.0
 
     strategy_functions = {
-        'RSI_Oversold_Strategy': check_rsi_oversold_strategy
+        'RSI_Enhanced_Strategy': check_rsi_enhanced_strategy # [التحديث] تم تغيير اسم الدالة والمفتاح
     }
     check_strategy = strategy_functions.get(strategy_name)
     if not check_strategy:
@@ -2312,8 +2319,8 @@ def main_bot_loop():
                 # --- [التعديل الرئيسي] ---
                 # تم استبدال جميع عمليات التحقق من الاستراتيجيات المتعددة
                 strategy_found = None
-                if check_rsi_oversold_strategy(df_featured, mtf_trend):
-                    strategy_found = "RSI_Oversold_Strategy"
+                if check_rsi_enhanced_strategy(df_featured, mtf_trend): # [التحديث] تم تغيير اسم الدالة
+                    strategy_found = "RSI_Enhanced_Strategy" # [التحديث] تم تغيير المفتاح
                 # --- نهاية التعديل ---
 
                 if strategy_found:
