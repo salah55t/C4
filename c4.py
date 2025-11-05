@@ -823,7 +823,7 @@ def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     
     # 2. فلتر الاتجاه: يجب أن يكون السعر فوق المتوسط المتحرك الأسي (EMA) لمدة 21
     # هذا يتجنب الشراء في اتجاه هابط قوي
-    trend_filter = last['close'] > last['ema21']
+    trend_filter = last['ema9'] > last['ema21']
     
     # 3. فلتر الحجم: يجب أن يكون حجم التداول الحالي أعلى من المتوسط
     # هذا يؤكد أن هناك زخماً خلف الارتداد
