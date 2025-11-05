@@ -1,4 +1,4 @@
-# ملف c4_rsi_strategy.py - (نسخة V34.1.1 معدلة)
+# ملف c4_rsi_strategy.py - (نسخة V34.1.2 معدلة)
 # --- وصف التعديلات:
 # 1. [الاستراتيجية الجديدة] تم استبدال جميع استراتيجيات التداول السابقة باستراتيجية واحدة جديدة.
 # 2. [استراتيجية RSI] الاستراتيجية الجديدة تعتمد حصرياً على مؤشر القوة النسبية (RSI) بإعدادات 14 فترة.
@@ -6,6 +6,7 @@
 # 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام (Flask, DB, WS).
 # 5. [تعديل الواجهة] تم إزالة خيارات تفعيل/إلغاء الاستراتيجيات المتعددة من صفحة الإعدادات.
 # 6. [تحديث الاستراتيجية] تم تحديث استراتيجية RSI لتشمل فلاتر الاتجاه (EMA21) والحجم (Volume MA).
+# 7. [تعديل V34.1.2] بناءً على الطلب، تم إزالة فلتر الاتجاه (EMA21) لتكون الاستراتيجية أقل صرامة.
 
 import time
 import os
@@ -146,7 +147,7 @@ REJECTION_REASONS_AR = {
 
     # Strategy Specific Rejections (Now simplified)
     "RSI: Ignored signal in bearish trend": "RSI: تم تجاهل الإشارة بسبب اتجاه هابط قوي",
-    "RSI: Ignored signal in bearish trend (below EMA21)": "RSI: تم تجاهل الإشارة (تحت EMA21)"
+    "RSI: Ignored signal in bearish trend (below EMA21)": "RSI: تم تجاهل الإشارة (تحت EMA21)" # (أصبح هذا السبب غير مستخدم)
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -810,7 +811,8 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
 # --- [التحديث] تم استبدال الدالة القديمة بالدالة الجديدة ---
 def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
-    استراتيجية RSI المُحسّنة: تتطلب تأكيداً من الاتجاه والحجم.
+    استراتيجية RSI المُعدّلة (أقل صرامة): 
+    تم إزالة فلتر الاتجاه (EMA21) بناءً على طلب المستخدم.
     """
     if len(df) < 50: 
         return False
@@ -821,20 +823,21 @@ def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     # 1. شرط إشارة RSI الأساسية (الارتداد من تحت 30)
     rsi_signal = prev['rsi'] < 30 and last['rsi'] >= 30
     
-    # 2. فلتر الاتجاه: يجب أن يكون السعر فوق المتوسط المتحرك الأسي (EMA) لمدة 21
-    # هذا يتجنب الشراء في اتجاه هابط قوي
-    trend_filter = last['ema9'] > last['ema21']
+    # 2. فلتر الاتجاه: (تم حذفه)
+    # trend_filter = last['close'] > last['ema21']
     
     # 3. فلتر الحجم: يجب أن يكون حجم التداول الحالي أعلى من المتوسط
     # هذا يؤكد أن هناك زخماً خلف الارتداد
     volume_filter = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.2
 
-    if rsi_signal and trend_filter and volume_filter:
-        logger.info(f"✅ [Enhanced RSI Signal] All conditions met.")
+    # --- [التعديل] تم إزالة trend_filter من الشرط ---
+    if rsi_signal and volume_filter:
+        logger.info(f"✅ [Enhanced RSI Signal] All conditions met (EMA21 filter removed).")
         return True
         
-    if rsi_signal and not trend_filter:
-        log_rejection(df.name if hasattr(df, 'name') else 'Unknown', "RSI: Ignored signal in bearish trend (below EMA21)")
+    # --- [التعديل] تم إزالة كتلة اللوجر الخاصة بـ trend_filter ---
+    # if rsi_signal and not trend_filter:
+    #     log_rejection(df.name if hasattr(df, 'name') else 'Unknown', "RSI: Ignored signal in bearish trend (below EMA21)")
         
     return False
 # --- نهاية الاستراتيجية ---
@@ -1084,7 +1087,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V34.1.1)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V34.1.2)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1151,7 +1154,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V34.1.1</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V34.1.2</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1557,7 +1560,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V34.1.1)</title>
+<title>الإعدادات - بوت 5 دقائق (V34.1.2)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2534,7 +2537,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot RSI Only (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot RSI Only (5-Min Scalper) V34.1.2 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
