@@ -1,12 +1,11 @@
-# ملف c4_rsi_strategy.py - (نسخة V34.1.2 معدلة)
-# --- وصف التعديلات:
-# 1. [الاستراتيجية الجديدة] تم استبدال جميع استراتيجيات التداول السابقة باستراتيجية واحدة جديدة.
-# 2. [استراتيجية RSI] الاستراتيجية الجديدة تعتمد حصرياً على مؤشر القوة النسبية (RSI) بإعدادات 14 فترة.
-# 3. [إشارة الشراء] يتم توليد إشارة شراء عندما يقطع مؤشر RSI مستوى التشبع البيعي (30) صعوداً.
-# 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام (Flask, DB, WS).
-# 5. [تعديل الواجهة] تم إزالة خيارات تفعيل/إلغاء الاستراتيجيات المتعددة من صفحة الإعدادات.
-# 6. [تحديث الاستراتيجية] تم تحديث استراتيجية RSI لتشمل فلاتر الاتجاه (EMA21) والحجم (Volume MA).
-# 7. [تعديل V34.1.2] بناءً على الطلب، تم إزالة فلتر الاتجاه (EMA21) لتكون الاستراتيجية أقل صرامة.
+# ملف c4_rsi_strategy.py - (نسخة V34.2.0 محسّنة)
+# --- التحسينات الرئيسية:
+# 1. نظام تأكيد متعدد العوالم: RSI + EMA21 + MACD + MFI
+# 2. درجة جودة ديناميكية بناءً على 5 معايير
+# 3. التعرف على أنماط الشموع اليابانية (الثورية)
+# 4. فلتر الحجم المتقدم باستخدام MFI
+# 5. حساب نقاط المحورية لأهداف مثلى
+# 6. خيار استعادة فلتر EMA21 مع إمكانية التبديل في الإعدادات
 
 import time
 import os
@@ -131,7 +130,15 @@ rejection_logs_lock = Lock()
 current_market_state: Dict[str, Any] = {"trend_details_by_tf": {}}
 market_state_lock = Lock()
 
-# --- قاموس أسباب الرفض باللغة العربية ---
+# --- [جديد] متغيرات إعدادات الاستراتيجية ---
+ENABLE_EMA_FILTER: bool = True
+ENABLE_MACD_CONFIRMATION: bool = True
+ENABLE_MFI_FILTER: bool = True
+ENABLE_CANDLESTICK_PATTERNS: bool = True
+REQUIRED_CONFIRMATIONS: int = 3
+strategy_config_lock = Lock()
+
+# --- قاموس أسباب الرفض باللغة العربية (محدث) ---
 REJECTION_REASONS_AR = {
     # General Filters
     "Market Volatility Filter Failed": "فلتر تقلب السوق رفض الدخول",
@@ -142,12 +149,17 @@ REJECTION_REASONS_AR = {
     "Low Quality Signal": "جودة الإشارة منخفضة",
     "Invalid Position Size": "حجم الصفقة غير صالح (الوقف أعلى من الدخول)",
     "News Filter Failed": "فلتر الأخبار: تجنب التداول وقت الأخبار",
-    "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
+    "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفظة",
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
 
-    # Strategy Specific Rejections (Now simplified)
-    "RSI: Ignored signal in bearish trend": "RSI: تم تجاهل الإشارة بسبب اتجاه هابط قوي",
-    "RSI: Ignored signal in bearish trend (below EMA21)": "RSI: تم تجاهل الإشارة (تحت EMA21)" # (أصبح هذا السبب غير مستخدم)
+    # Strategy Specific Rejections
+    "RSI: No bullish crossover": "RSI: لم يحدث اختراق صعودي لمستوى 30",
+    "EMA Filter: Below EMA21": "فلتر EMA: السعر تحت المتوسط المتحرك 21",
+    "MACD: No bullish momentum": "MACD: لا يوجد زخم صعودي",
+    "MFI: Low volume pressure": "MFI: ضغط حجم ضعيف",
+    "Candlestick: No bullish pattern": "الشموع: لا يوجد نمط صعودي مؤكد",
+    "Insufficient confirmations": "تأكيدات غير كافية",
+    "Multiple conditions failed": "عدة شروط تأكيد فشلت"
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -185,6 +197,12 @@ def get_dashboard_payload() -> Dict:
     with trade_amount_lock:
         trade_amount_min = FIXED_TRADE_AMOUNT_MIN_USDT
         trade_amount_max = FIXED_TRADE_AMOUNT_MAX_USDT
+    with strategy_config_lock:
+        ema_filter = ENABLE_EMA_FILTER
+        macd_confirm = ENABLE_MACD_CONFIRMATION
+        mfi_filter = ENABLE_MFI_FILTER
+        candle_confirm = ENABLE_CANDLESTICK_PATTERNS
+        req_confirm = REQUIRED_CONFIRMATIONS
 
 
     return {
@@ -197,10 +215,17 @@ def get_dashboard_payload() -> Dict:
         "min_signal_quality": min_quality,
         "trade_amount_min": trade_amount_min,
         "trade_amount_max": trade_amount_max,
+        "strategy_config": {
+            "enable_ema_filter": ema_filter,
+            "enable_macd_confirmation": macd_confirm,
+            "enable_mfi_filter": mfi_filter,
+            "enable_candlestick_patterns": candle_confirm,
+            "required_confirmations": req_confirm
+        },
         "server_time": datetime.now(timezone.utc).isoformat()
     }
 
-# --- دوال تهيئة الخدمات وقاعدة البيانات ---
+# --- باقي دوال المساعدة (unchanged) ---
 def optimize_database():
     if not check_db_connection() or not conn:
         return
@@ -301,7 +326,6 @@ def init_redis() -> None:
         logger.warning(f"⚠️ [Redis] Connection failed: {e}.")
         redis_client = None
 
-# --- دوال المساعدة والإشعارات ---
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error}
     log_methods.get(level.lower(), logger.info)(message)
@@ -371,9 +395,12 @@ def send_enhanced_telegram_message(message: str, force: bool = False):
 
 def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: float, stop_loss: float,
                                 target1: float, target2: float, quantity: float, is_real: bool,
-                                quality_score: int, atr_percent: float, notional_value: float):
+                                quality_score: int, atr_percent: float, notional_value: float, confirmations: Dict):
     trade_type = "حقيقية" if is_real else "ورقية"
     emoji = "🔥" if is_real else "📊"
+    
+    # إنشاء قائمة التأكيدات
+    confirms_list = "\n".join([f"✅ {k.replace('_', ' ').title()}: {'نعم' if v else 'لا'}" for k, v in confirmations.items()])
     
     message = (
         f"{emoji} *صفقة {trade_type} جديدة (5 دقائق)*\n\n"
@@ -381,6 +408,7 @@ def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: f
         f"*الاستراتيجية:* `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n"
         f"*جودة الإشارة:* `{quality_score}/100`\n"
         f"*تقلب السوق:* `{atr_percent:.2f}%`\n\n"
+        f"*التأكيدات:*\n{confirms_list}\n\n"
         f"*سعر الدخول:* `{entry_price:.4f}`\n"
         f"*وقف الخسارة:* `{stop_loss:.4f}`\n"
         f"*الهدف الأول:* `{target1:.4f}`\n"
@@ -568,6 +596,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
+# --- [محدثة] حسابات المؤشرات المتقدمة ---
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     
@@ -642,9 +671,26 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- VWAP ---
     df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
     
+    # --- [جديد] MFI (Money Flow Index) ---
+    typical_price = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
+    money_flow = typical_price * df_calc['volume']
+    positive_flow = money_flow.where(typical_price.diff() > 0, 0)
+    negative_flow = money_flow.where(typical_price.diff() < 0, 0)
+    positive_flow_sum = positive_flow.rolling(14).sum()
+    negative_flow_sum = negative_flow.rolling(14).sum()
+    money_ratio = positive_flow_sum / negative_flow_sum.replace(0, 1e-9)
+    df_calc['mfi'] = 100 - (100 / (1 + money_ratio))
+    
+    # --- [جديد] Pivot Points ---
+    df_calc['pivot'] = (df_calc['high'].shift(1) + df_calc['low'].shift(1) + df_calc['close'].shift(1)) / 3
+    df_calc['r1'] = 2 * df_calc['pivot'] - df_calc['low'].shift(1)
+    df_calc['s1'] = 2 * df_calc['pivot'] - df_calc['high'].shift(1)
+    df_calc['r2'] = df_calc['pivot'] + (df_calc['high'].shift(1) - df_calc['low'].shift(1))
+    df_calc['s2'] = df_calc['pivot'] - (df_calc['high'].shift(1) - df_calc['low'].shift(1))
+    
     return df_calc
 
-# --- Data Loading & Settings Management ---
+# --- Data Loading & Settings Management (unchanged) ---
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
     try:
@@ -672,6 +718,7 @@ def load_notifications_to_cache():
 
 def load_settings_from_redis():
     global FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT, MAX_OPEN_TRADES, paper_trading_mode, MIN_SIGNAL_QUALITY
+    global ENABLE_EMA_FILTER, ENABLE_MACD_CONFIRMATION, ENABLE_MFI_FILTER, ENABLE_CANDLESTICK_PATTERNS, REQUIRED_CONFIRMATIONS
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
@@ -687,8 +734,18 @@ def load_settings_from_redis():
         if quality_settings_data:
             quality_settings = json.loads(quality_settings_data)
             with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 70)
-
-        # تم إزالة تحميل إعدادات الاستراتيجيات المتعددة
+            
+        # [جديد] تحميل إعدادات الاستراتيجية
+        strategy_config_data = redis_client.get('strategy_config')
+        if strategy_config_data:
+            strategy_config = json.loads(strategy_config_data)
+            with strategy_config_lock:
+                ENABLE_EMA_FILTER = strategy_config.get('enable_ema_filter', True)
+                ENABLE_MACD_CONFIRMATION = strategy_config.get('enable_macd_confirmation', True)
+                ENABLE_MFI_FILTER = strategy_config.get('enable_mfi_filter', True)
+                ENABLE_CANDLESTICK_PATTERNS = strategy_config.get('enable_candlestick_patterns', True)
+                REQUIRED_CONFIRMATIONS = strategy_config.get('required_confirmations', 3)
+        
         logger.info("✅ [Redis] Successfully loaded settings from Redis.")
     except Exception as e:
         logger.error(f"❌ [Redis] Error loading settings: {e}")
@@ -710,7 +767,15 @@ def save_settings_to_redis():
         quality_settings = {'min_quality': MIN_SIGNAL_QUALITY}
         redis_client.set('signal_quality_settings', json.dumps(quality_settings))
         
-        # تم إزالة حفظ إعدادات الاستراتيجيات المتعددة
+        # [جديد] حفظ إعدادات الاستراتيجية
+        strategy_config = {
+            'enable_ema_filter': ENABLE_EMA_FILTER,
+            'enable_macd_confirmation': ENABLE_MACD_CONFIRMATION,
+            'enable_mfi_filter': ENABLE_MFI_FILTER,
+            'enable_candlestick_patterns': ENABLE_CANDLESTICK_PATTERNS,
+            'required_confirmations': REQUIRED_CONFIRMATIONS
+        }
+        redis_client.set('strategy_config', json.dumps(strategy_config))
         
         logger.info("Settings saved to Redis successfully")
         return True
@@ -719,11 +784,13 @@ def save_settings_to_redis():
         logger.error(f"Error saving settings to Redis: {e}")
         return False
 
+# --- Data Loading & Settings Management (unchanged) ---
+
 # --- الفلاتر الديناميكية ونظام السوق ---
 # تم حذف جميع دوال الفلاتر الديناميكية (check_..._dynamic_filters) لأنها خاصة بالاستراتيجيات القديمة
 # تم حذف دالة get_wave_retracement
 
-# --- General Filters ---
+# --- General Filters (unchanged) ---
 def add_news_filter() -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
     now = datetime.now(timezone.utc)
@@ -769,7 +836,7 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     return True
 
-# --- Dynamic Stop Loss & Take Profit ---
+# --- Dynamic Stop Loss & Take Profit (unchanged) ---
 def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     last = df.iloc[-1]
     atr_value = last.get('atr', 0)
@@ -801,18 +868,24 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     target1 = entry_price + (risk_amount * rr1)
     target2 = entry_price + (risk_amount * rr2)
     
+    # [جديد] استخدام نقاط المحورية كأهداف إضافية
+    if 'r1' in df.columns:
+        r1 = df.iloc[-1].get('r1', target1)
+        r2 = df.iloc[-1].get('r2', target2)
+        target1 = max(target1, r1 * 0.98) # ضمان أن الهدف ليس بعيداً جداً
+        target2 = max(target2, r2 * 0.98)
+    
     return target1, target2
 
-# --- استراتيجيات التداول (الآن استراتيجية واحدة فقط) ---
-
-# تم حذف جميع دوال الاستراتيجيات السابقة
-# (check_ema_rsi_strategy_enhanced, check_bb_stoch_strategy_enhanced, etc.)
-
-# --- [التحديث] تم استبدال الدالة القديمة بالدالة الجديدة ---
+# --- [محدّثة] استراتيجية RSI المتقدمة مع تأكيدات متعددة ---
 def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
-    استراتيجية RSI المُعدّلة (أقل صرامة): 
-    تم إزالة فلتر الاتجاه (EMA21) بناءً على طلب المستخدم.
+    استراتيجية RSI المُحسّنة مع تأكيدات متعددة:
+    - RSI: اختراق صعودي لمستوى 30
+    - EMA21: السعر أعلى من المتوسط المتحرك (اختياري)
+    - MACD: زخم صعودي
+    - MFI: ضغط حجم قوي
+    - Candlestick: نمط صعودي مؤكد
     """
     if len(df) < 50: 
         return False
@@ -820,28 +893,109 @@ def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 1. شرط إشارة RSI الأساسية (الارتداد من تحت 30)
-    rsi_signal = prev['rsi'] < 30 and last['rsi'] >= 30
+    confirmations = {
+        'rsi_crossover': False,
+        'ema_trend': False,
+        'macd_momentum': False,
+        'mfi_pressure': False,
+        'candlestick_bullish': False
+    }
     
-    # 2. فلتر الاتجاه: (تم حذفه)
-    # trend_filter = last['close'] > last['ema21']
+    # 1. شرط RSI الأساسي (الارتداد من تحت 30)
+    confirmations['rsi_crossover'] = prev['rsi'] < 30 and last['rsi'] >= 30
     
-    # 3. فلتر الحجم: يجب أن يكون حجم التداول الحالي أعلى من المتوسط
-    # هذا يؤكد أن هناك زخماً خلف الارتداد
-    volume_filter = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.2
+    # 2. فلتر EMA21 (اختياري)
+    with strategy_config_lock:
+        ema_enabled = ENABLE_EMA_FILTER
+    if ema_enabled:
+        confirmations['ema_trend'] = last['close'] > last['ema21']
+    else:
+        confirmations['ema_trend'] = True  # إذا كان معطل، يعتبر شرطاً صحيحاً
+    
+    # 3. تأكيد MACD
+    with strategy_config_lock:
+        macd_enabled = ENABLE_MACD_CONFIRMATION
+    if macd_enabled:
+        confirmations['macd_momentum'] = last['macd_hist'] > 0 and prev['macd_hist'] < last['macd_hist']
+    else:
+        confirmations['macd_momentum'] = True
+    
+    # 4. فلتر MFI (ضغط الحجم)
+    with strategy_config_lock:
+        mfi_enabled = ENABLE_MFI_FILTER
+    if mfi_enabled:
+        confirmations['mfi_pressure'] = last['mfi'] > 20  # فوق مستوى التشبع البيعي للحجم
+    else:
+        confirmations['mfi_pressure'] = True
+    
+    # 5. نمط الشموع اليابانية
+    with strategy_config_lock:
+        candle_enabled = ENABLE_CANDLESTICK_PATTERNS
+    if candle_enabled:
+        confirmations['candlestick_bullish'] = detect_bullish_candlestick_pattern(df)
+    else:
+        confirmations['candlestick_bullish'] = True
+    
+    # حساب عدد التأكيدات النشطة
+    active_confirmations = sum(confirmations.values())
+    
+    with strategy_config_lock:
+        required = REQUIRED_CONFIRMATIONS
+    
+    # تسجيل أسباب الرفض للتصحيح
+    if not confirmations['rsi_crossover']:
+        log_rejection(df.name if hasattr(df, 'name') else 'Unknown', "RSI: No bullish crossover")
+        return False
+    
+    if active_confirmations < required:
+        failed_conditions = [k for k, v in confirmations.items() if not v]
+        log_rejection(df.name if hasattr(df, 'name') else 'Unknown', 
+                     f"Insufficient confirmations ({active_confirmations}/{required})", 
+                     {"failed": ', '.join(failed_conditions)})
+        return False
+    
+    # إذا وصلنا هنا، يعني أن جميع التأكيدات المطلوبة تم تحقيقها
+    logger.info(f"✅ [Enhanced RSI Signal] All {active_confirmations}/{required} confirmations met for {df.name if hasattr(df, 'name') else 'Unknown'}.")
+    # نحفظ التأكيدات في البيانات الوصفية للإشارة
+    df.confirmations = confirmations
+    return True
 
-    # --- [التعديل] تم إزالة trend_filter من الشرط ---
-    if rsi_signal and volume_filter:
-        logger.info(f"✅ [Enhanced RSI Signal] All conditions met (EMA21 filter removed).")
-        return True
-        
-    # --- [التعديل] تم إزالة كتلة اللوجر الخاصة بـ trend_filter ---
-    # if rsi_signal and not trend_filter:
-    #     log_rejection(df.name if hasattr(df, 'name') else 'Unknown', "RSI: Ignored signal in bearish trend (below EMA21)")
-        
-    return False
-# --- نهاية الاستراتيجية ---
+# --- [جديد] دالة كشف أنماط الشموع اليابانية ---
+def detect_bullish_candlestick_pattern(df: pd.DataFrame) -> bool:
+    """
+    تكتشف الأنماط الصعودية:
+    - Hammer / Inverted Hammer
+    - Bullish Engulfing
+    - Morning Star (مبسطة)
+    """
+    if len(df) < 3:
+        return False
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+    
+    # Hammer pattern
+    body = abs(last['close'] - last['open'])
+    lower_shadow = min(last['open'], last['close']) - last['low']
+    upper_shadow = last['high'] - max(last['open'], last['close'])
+    
+    is_hammer = body > 0 and lower_shadow > 2 * body and upper_shadow < 0.3 * body
+    
+    # Bullish Engulfing
+    prev_body = abs(prev['close'] - prev['open'])
+    prev_is_red = prev['close'] < prev['open']
+    current_is_green = last['close'] > last['open']
+    is_engulfing = prev_is_red and current_is_green and last['close'] > prev['open'] and last['open'] < prev['close']
+    
+    # Morning Star (مبسطة)
+    star_body_small = abs(prev['close'] - prev['open']) < 0.3 * abs(prev2['close'] - prev2['open'])
+    prev2_is_red = prev2['close'] < prev2['open']
+    is_morning_star = prev2_is_red and star_body_small and current_is_green and last['close'] > prev2['open']
+    
+    return is_hammer or is_engulfing or is_morning_star
 
+# --- (Rest of the functions remain the same) ---
 def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
     """
     Formats the quantity to the correct precision required by Binance API for a specific symbol.
@@ -921,7 +1075,7 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         initial_quantity = dec_desired_amount / dec_entry
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
 
-        if adjusted_quantity is None:
+        if adjusted_quantity is None or adjusted_quantity <= 0:
              logger.warning(f"[{symbol}] Initial quantity adjustment failed (likely too small). Will check against MIN_NOTIONAL.")
              adjusted_quantity = Decimal('0')
 
@@ -969,6 +1123,7 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
         return None
 
+# --- [محدثة] إنشاء إشارة التداول مع درجة جودة ديناميكية ---
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     df.strategy = strategy_name 
     
@@ -977,7 +1132,9 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
     if not add_correlation_filter(symbol): log_rejection(symbol, "Correlation Filter Failed"); return
 
-    quality_score = 75 # Placeholder value - (يمكنك تطوير دالة لتقييم الجودة بناءً على قوة الارتداد مثلاً)
+    # درجة جودة ديناميكية بناءً على 5 معايير
+    quality_score = calculate_dynamic_quality_score(df, symbol)
+    
     with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
     if quality_score < min_score:
         log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
@@ -994,10 +1151,19 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
 
     with trading_mode_lock: is_real = not paper_trading_mode
     
+    # جلب التأكيدات إن وجدت
+    confirmations = getattr(df, 'confirmations', {})
+    
     signal_details = {
-        "atr": df.iloc[-1].get('atr', 0), "trailing_stop_activated": False, "tp1_done": False,
-        "quality_score": quality_score, "atr_percent": df.iloc[-1].get('atr_percent', 0),
-        "rsi_at_signal": df.iloc[-1].get('rsi', 0) # إضافة قيمة RSI للإشارة
+        "atr": df.iloc[-1].get('atr', 0), 
+        "trailing_stop_activated": False, 
+        "tp1_done": False,
+        "quality_score": quality_score, 
+        "atr_percent": df.iloc[-1].get('atr_percent', 0),
+        "rsi_at_signal": df.iloc[-1].get('rsi', 0),
+        "confirmations": confirmations,  # [جديد]
+        "mfi_at_signal": df.iloc[-1].get('mfi', 0),  # [جديد]
+        "macd_hist_at_signal": df.iloc[-1].get('macd_hist', 0)  # [جديد]
     }
     
     trade_levels = {
@@ -1038,7 +1204,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             send_trade_open_notification(
                 symbol, strategy_name, float(avg_fill_price),
                 stop_loss_price, target_price_1, target_price_2, float(final_quantity),
-                is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value
+                is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value, confirmations
             )
         except BinanceAPIException as e:
             logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
@@ -1049,9 +1215,58 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, float(quantity_dec), signal_details)
         send_trade_open_notification(
             symbol, strategy_name, entry_price, stop_loss_price, target_price_1, target_price_2,
-            float(quantity_dec), is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value
+            float(quantity_dec), is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value, confirmations
         )
         # لا يتم خصم أي شيء من الرصيد في الصفقات الورقية
+
+# --- [جديد] حساب درجة جودة ديناميكية ---
+def calculate_dynamic_quality_score(df: pd.DataFrame, symbol: str) -> int:
+    """
+    حساب درجة الجودة بناءً على 5 معايير (كل معيار 20 نقطة):
+    1. قوة اختراق RSI (مدى الارتفاع عن 30)
+    2. بعد السعر عن EMA21 (كلما كان أعلى كانت الجودة أفضل)
+    3. قوة زخم MACD (حجم الهيستوجرام)
+    4. ضغط الحجم (MFI)
+    5. تقلب السوق (ATR في المستوى المثالي)
+    """
+    if len(df) < 2:
+        return 0
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    score = 0
+    
+    # 1. RSI Crossover Strength (20 points)
+    if prev['rsi'] < 30 and last['rsi'] >= 30:
+        rsi_strength = min((last['rsi'] - 30) / 10 * 20, 20)  # كل 1 نقطة فوق 30 = 2 نقاط
+        score += rsi_strength
+    
+    # 2. EMA21 Distance (20 points)
+    ema_distance = ((last['close'] - last['ema21']) / last['ema21']) * 100
+    if ema_distance > 0:
+        ema_score = min(ema_distance * 4, 20)  # كل 0.5% = 2 نقاط
+        score += ema_score
+    
+    # 3. MACD Momentum (20 points)
+    macd_strength = last['macd_hist']
+    if macd_strength > 0:
+        macd_score = min(macd_strength / abs(last['macd_signal']) * 20, 20)
+        score += macd_score
+    
+    # 4. MFI Volume Pressure (20 points)
+    if last['mfi'] > 20:
+        mfi_score = min((last['mfi'] - 20) / 80 * 20, 20)
+        score += mfi_score
+    
+    # 5. ATR Volatility (20 points) - المستوى المثالي 0.5-1.5%
+    atr_percent = last['atr_percent']
+    if 0.5 <= atr_percent <= 1.5:
+        score += 20
+    elif atr_percent > 0.35 and atr_percent < 3.0:
+        score += 10  # نصف النقاط إذا كان في نطاق مقبول
+    
+    return int(min(score, 100))
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -1080,14 +1295,14 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         if conn: conn.rollback()
 
 
-# --- HTML Templates (remain unchanged) ---
+# --- HTML Templates (تحديثها مع خيارات الاستراتيجية الجديدة) ---
 DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V34.1.2)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V34.2.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1150,11 +1365,16 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .slider::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #3aa0ff; cursor: pointer; }
 input[type=number] { -moz-appearance: textfield; }
 input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.confirmations-grid {display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; font-size: 11px; margin-top: 6px;}
+.confirmation-item {display: flex; align-items: center; gap: 4px;}
+.confirmation-item .indicator {width: 8px; height: 8px; border-radius: 50%;}
+.confirmation-item .indicator.true {background: var(--ok);}
+.confirmation-item .indicator.false {background: var(--bad);}
 </style>
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V34.1.2</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V34.2.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1210,7 +1430,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
               <label class="switch" id="tradingModeSwitch">
                 <input type="checkbox" id="tradingModeToggle">
                 <span class="dot"></span>
-                <span id="tradingModeText">ورقي</span>
+                <span id="tradingModeText">{% if is_paper_mode %}ورقي (Paper){% else %}حقيقي (Real){% endif %}</span>
               </label>
             </div>
           </div>
@@ -1311,11 +1531,22 @@ function renderSignal(signal) {
     const qualityScore = signal.signal_details?.quality_score || 0;
     const qualityColor = qualityScore > 75 ? 'var(--ok)' : qualityScore > 55 ? 'var(--warn)' : 'var(--bad)';
     const strategyName = signal.strategy_name.replace(/_/g, " ").replace("Strategy", "");
+    
+    // [جديد] عرض التأكيدات
+    const confirmations = signal.signal_details?.confirmations || {};
+    const confirmationsHtml = Object.entries(confirmations).map(([key, value]) => 
+        `<div class="confirmation-item">
+            <div class="indicator ${value}"></div>
+            <span>${key.replace('_', ' ')}</span>
+        </div>`
+    ).join('');
+    
     return `
         <div class="signal" id="signal-${signal.id}" data-symbol="${signal.symbol}">
             <div>
                 <div class="sig-title">${signal.symbol}</div>
                 <div class="sig-meta">${strategyName} | <span style="color: ${qualityColor}; font-weight: bold;">⭐ ${qualityScore}/100</span></div>
+                <div class="confirmations-grid">${confirmationsHtml}</div>
             </div>
             <div style="text-align:end">
                 <div class="price">${fmt(cp)}</div>
@@ -1560,7 +1791,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V34.1.2)</title>
+<title>الإعدادات - بوت 5 دقائق (V34.2.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -1583,8 +1814,7 @@ h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
 .switch input{display:none}
 .switch .dot{width:14px;height:14px;border-radius:50%;background:#6a7fb2;transition:.2s}
 .switch input:checked + .dot{background:#24d08a;transform:translateX(2px) scale(1.1)}
-.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: background-color 0.2s, transform 0.2s; text-decoration: none;}
-.btn:hover{transform:translateY(-1px);border-color:#3a58a6}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: .18s; text-decoration: none;}
 .btn.primary{background: linear-gradient(180deg, var(--accent), #2a80d3); border-color: #4aaeff;}
 .footer-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:24px;border-top:1px solid #1e2c52;padding-top:16px;}
 .notification { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: #1e2c52; color: #e8f1ff; padding: 12px 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index: 1000; opacity: 0; transition: opacity 0.3s, transform 0.3s; }
@@ -1631,7 +1861,45 @@ h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
             </div>
         </div>
 
-        <!-- تم إزالة كارد إعدادات الاستراتيجيات لأنها أصبحت استراتيجية واحدة -->
+        <!-- [جديد] إعدادات الاستراتيجية -->
+        <div class="card" style="margin-top: 16px;">
+            <h2>إعدادات الاستراتيجية المتقدمة</h2>
+            <div class="card-body form-grid">
+                <div class="form-group">
+                    <label>تفعيل فلتر EMA21</label>
+                    <label class="switch">
+                        <input type="checkbox" name="enable_ema_filter" {% if strategy_config.enable_ema_filter %}checked{% endif %}>
+                        <span class="dot"></span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>تفعيل تأكيد MACD</label>
+                    <label class="switch">
+                        <input type="checkbox" name="enable_macd_confirmation" {% if strategy_config.enable_macd_confirmation %}checked{% endif %}>
+                        <span class="dot"></span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>تفعيل فلتر MFI</label>
+                    <label class="switch">
+                        <input type="checkbox" name="enable_mfi_filter" {% if strategy_config.enable_mfi_filter %}checked{% endif %}>
+                        <span class="dot"></span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>تفعيل أنماط الشموع</label>
+                    <label class="switch">
+                        <input type="checkbox" name="enable_candlestick_patterns" {% if strategy_config.enable_candlestick_patterns %}checked{% endif %}>
+                        <span class="dot"></span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label for="requiredConfirmations">عدد التأكيدات المطلوبة</label>
+                    <input type="number" id="requiredConfirmations" name="required_confirmations" value="{{ strategy_config.required_confirmations }}" step="1" min="1" max="5">
+                    <small class="note">عدد الشروط التي يجب تحقيقها للدخول</small>
+                </div>
+            </div>
+        </div>
         
         <div class="footer-actions">
             <button type="submit" class="btn primary">حفظ التغييرات</button>
@@ -1645,9 +1913,12 @@ document.getElementById('settingsForm').addEventListener('submit', function(e) {
     e.preventDefault();
     const formData = new FormData(this);
     const settings = {};
+    const strategyConfig = {};
 
     for (const [key, value] of formData.entries()) {
-        if (key === 'paper_trading_mode') {
+        if (key.includes('enable_') || key === 'required_confirmations') {
+            strategyConfig[key] = formData.has(key);
+        } else if (key === 'paper_trading_mode') {
             settings[key] = false;
         } else {
             settings[key] = value;
@@ -1664,7 +1935,11 @@ document.getElementById('settingsForm').addEventListener('submit', function(e) {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(settings)
         }),
-        // تم إزالة fetch لـ /api/strategies
+        fetch('/api/strategy_config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(strategyConfig)
+        }),
         fetch('/api/signal_quality', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -1720,7 +1995,9 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .card-body{padding:16px}
 .form-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: end;}
 .form-group label {display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px;}
-.form-group input, .form-group select {width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px;}
+.form-group input, .form-group select {
+    background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px;
+}
 .btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: .18s; text-decoration: none;}
 .btn.primary {background: var(--accent); color: #fff; border-color: var(--accent);}
 .results-grid {display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 24px;}
@@ -1898,7 +2175,7 @@ function updateEquityChart(equityData) {
 </html>
 """
 
-# --- مسارات Flask ---
+# --- مسارات Flask (تحديثها) ---
 @app.route('/')
 def dashboard(): return render_template_string(DASHBOARD_TEMPLATE)
 @app.route('/backtest')
@@ -1911,15 +2188,22 @@ def settings_page():
         trade_amount_max = FIXED_TRADE_AMOUNT_MAX_USDT
     with trading_mode_lock: is_paper_mode = paper_trading_mode
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
-    
-    # تم تبسيط هذا القسم - لا توجد حاجة لإرسال حالات الاستراتيجية
+    with strategy_config_lock:
+        strategy_config = {
+            "enable_ema_filter": ENABLE_EMA_FILTER,
+            "enable_macd_confirmation": ENABLE_MACD_CONFIRMATION,
+            "enable_mfi_filter": ENABLE_MFI_FILTER,
+            "enable_candlestick_patterns": ENABLE_CANDLESTICK_PATTERNS,
+            "required_confirmations": REQUIRED_CONFIRMATIONS
+        }
     
     return render_template_string(SETTINGS_TEMPLATE, 
                                   trade_amount_min=trade_amount_min,
                                   trade_amount_max=trade_amount_max,
                                   MAX_OPEN_TRADES=MAX_OPEN_TRADES,
                                   min_quality=min_quality,
-                                  is_paper_mode=is_paper_mode)
+                                  is_paper_mode=is_paper_mode,
+                                  strategy_config=strategy_config)
 
 @app.route('/api/dashboard_data')
 def dashboard_data():
@@ -1959,7 +2243,25 @@ def update_settings():
         logger.error(f"Error updating settings: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-# (Rest of the Flask routes and main script logic remains the same as previous version)
+# [جديد] مسار إعدادات الاستراتيجية
+@app.route('/api/strategy_config', methods=['POST'])
+def update_strategy_config():
+    try:
+        data = request.json
+        with strategy_config_lock:
+            global ENABLE_EMA_FILTER, ENABLE_MACD_CONFIRMATION, ENABLE_MFI_FILTER, ENABLE_CANDLESTICK_PATTERNS, REQUIRED_CONFIRMATIONS
+            ENABLE_EMA_FILTER = bool(data.get('enable_ema_filter', True))
+            ENABLE_MACD_CONFIRMATION = bool(data.get('enable_macd_confirmation', True))
+            ENABLE_MFI_FILTER = bool(data.get('enable_mfi_filter', True))
+            ENABLE_CANDLESTICK_PATTERNS = bool(data.get('enable_candlestick_patterns', True))
+            REQUIRED_CONFIRMATIONS = int(data.get('required_confirmations', 3))
+        save_settings_to_redis()
+        return jsonify({"success": True, "message": "Strategy config updated successfully"})
+    except Exception as e:
+        logger.error(f"Error updating strategy config: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+# (Rest of the Flask routes remain the same)
 @app.route('/api/health')
 def api_health():
     try:
@@ -2071,8 +2373,6 @@ def advanced_performance_data():
     except Exception as e:
         logger.error(f"❌ [API] Error fetching advanced performance data: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-
-# تم حذف مسار /api/strategies لأنه لم يعد مطلوباً
 
 @app.route('/api/signal_quality', methods=['POST'])
 def update_signal_quality():
@@ -2322,7 +2622,7 @@ def main_bot_loop():
                 # --- [التعديل الرئيسي] ---
                 # تم استبدال جميع عمليات التحقق من الاستراتيجيات المتعددة
                 strategy_found = None
-                if check_rsi_enhanced_strategy(df_featured, mtf_trend): # [التحديث] تم تغيير اسم الدالة
+                if check_rsi_enhanced_strategy(df_featured, mtf_trend): # [التحديث] تم تغيير اسم الدالة والمفتاح
                     strategy_found = "RSI_Enhanced_Strategy" # [التحديث] تم تغيير المفتاح
                 # --- نهاية التعديل ---
 
@@ -2537,7 +2837,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot RSI Only (5-Min Scalper) V34.1.2 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot RSI Enhanced (5-Min Scalper) V34.2.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
