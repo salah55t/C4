@@ -321,7 +321,7 @@ def init_db(retries: int = 5, base_delay: int = 5) -> None:
             if conn: conn.rollback()
             if attempt < retries - 1:
                 delay = base_delay * (2  ** attempt)
-                logger.info(f"[DB] Retrying connection in {delay} seconds...')
+                logger.info(f"[DB] Retrying connection in {delay} seconds...")
                 time.sleep(delay)
             else:
                 logger.critical(" ❌ [DB] Failed to connect after all retries. Exiting.")
