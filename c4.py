@@ -51,29 +51,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger('CryptoBotRSI_5min')
 
-# --- المشفر المخصص لأنواع بيانات NumPy ---
-class NpEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer): return int(obj)
-        if isinstance(obj, np.floating): return float(obj)
-        if isinstance(obj, np.ndarray): return obj.tolist()
-        if isinstance(obj, Decimal): return float(obj)
-        if isinstance(obj, (datetime, pd.Timestamp)): return obj.isoformat()
-        return super(NpEncoder, self).default(obj)
+# --- المتغيرات العامة والإعدادات ---
+API_KEY: str = config('BINANCE_API_KEY')
+API_SECRET: str = config('BINANCE_API_SECRET')
+DB_URL: str = config('DATABASE_URL')
+REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
+TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
+TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
 
-# --- تحميل متغيرات البيئة ---
-try:
-    API_KEY: str = config('BINANCE_API_KEY')
-    API_SECRET: str = config('BINANCE_API_SECRET')
-    DB_URL: str = config('DATABASE_URL')
-    REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
-    TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
-    TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
-except Exception as e:
-    logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
-    exit(1)
-
-# --- متغيرات عامة وإعدادات البوت ---
+# --- متغيرات الحالة ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
@@ -173,7 +159,8 @@ def broadcast(data: Dict):
     """بث البيانات لجميع عملاء WebSocket مع معالجة الأخطاء"""
     with ws_clients_lock:
         if not ws_clients:
-            logger.warning("[WebSocket] No clients connected to broadcast")
+            # تغيير من warning إلى debug لتجنب إزعاج السجلات
+            logger.debug("[WebSocket] No clients connected to broadcast")
             return
         
         clients_to_remove = []
@@ -1378,7 +1365,7 @@ def start_periodic_reports():
     logger.info("✅ [Periodic Reports] Started scheduler thread")
 
 def handle_socket_message(msg):
-    """معالجة رسائل WebSocket"""
+    """معالجة رسائل WebSocket مع تحسين لتقليل البث غير الضروري"""
     global live_prices
     try:
         if msg and 'e' in msg and msg['e'] == 'error':
@@ -1388,9 +1375,19 @@ def handle_socket_message(msg):
         if isinstance(msg, list):
             price_updates = {}
             with live_prices_lock:
+                # تحسين: فقط معالجة الرموز التي لدينا صفقات مفتوحة لها
+                # أو التي يتم مراقبتها حالياً
+                with signal_cache_lock:
+                    monitored_symbols = set(open_signals_cache.keys())
+                
                 for ticker in msg:
                     if 's' in ticker and 'c' in ticker:
                         symbol = ticker['s']
+                        
+                        # تخطي الرموز غير المرغوبة لتقليل المعالجة
+                        if symbol not in monitored_symbols:
+                            continue
+                            
                         try:
                             price = float(ticker['c'])
                             live_prices[symbol] = price
@@ -1880,7 +1877,7 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     profit = ((closing_price - entry_price) / entry_price) * 100
     
     # تحديث قاعدة البيانات
-    update_signal_in_db(signal_id, {
+    update_signal_in_db(signal['id'], {
         "status": "closed",
         "closing_price": closing_price,
         "closed_at": datetime.now(timezone.utc),
@@ -2820,13 +2817,13 @@ function setupWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     
-    logger.log(`[WebSocket] Connecting to ${wsUrl}...`);
+    console.log(`[WebSocket] Connecting to ${wsUrl}...`);
     updateConnectionStatus('connecting', 'جاري الاتصال بـ WebSocket...');
     
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-        logger.log("[WebSocket] Connected");
+        console.log("[WebSocket] Connected");
         updateConnectionStatus('connected', 'متصل بـ WebSocket');
         reconnectAttempts = 0;
     };
@@ -2877,12 +2874,12 @@ function setupWebSocket() {
     };
     
     ws.onclose = () => {
-        logger.warn("[WebSocket] Disconnected");
+        console.warn("[WebSocket] Disconnected");
         updateConnectionStatus('warning', 'غير متصل بـ WebSocket');
         
         if (reconnectAttempts < maxReconnectAttempts) {
             reconnectAttempts++;
-            logger.log(`[WebSocket] Reconnecting... Attempt ${reconnectAttempts}/${maxReconnectAttempts}`);
+            console.log(`[WebSocket] Reconnecting... Attempt ${reconnectAttempts}/${maxReconnectAttempts}`);
             updateConnectionStatus('connecting', `إعادة الاتصال... المحاولة ${reconnectAttempts}`);
             setTimeout(setupWebSocket, Math.min(1000 * reconnectAttempts, 5000));
         } else {
@@ -3528,7 +3525,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
             
             if exit_price:
                 profit = (exit_price - active_trade['entry_price']) * active_trade['quantity']
-                equity_curve.push(equity_curve[-1] + profit)
+                equity_curve.append(equity_curve[-1] + profit)
                 
                 active_trade.update({
                     'exit_time': current_candle.name.isoformat(),
@@ -3537,7 +3534,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
                     'exit_reason': exit_reason
                 })
                 
-                results.push(active_trade)
+                results.append(active_trade)
                 active_trade = None
 
         # البحث عن إشارات جديدة
