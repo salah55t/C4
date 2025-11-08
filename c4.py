@@ -181,7 +181,7 @@ def broadcast(data: Dict):
 
 def get_dashboard_payload() -> Dict:
     with trading_status_lock: trading_enabled = is_trading_enabled
-    with trading_mode_lock: is_paper_mode = paper_trading_mode
+    with trading_mode_lock: is_paper_mode = paper_trading_mode = paper_trading_mode
     with balance_lock: current_balance = usdt_balance
     with notifications_lock: notifications = list(notifications_cache)
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
@@ -1243,6 +1243,8 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     df_copy = df.copy()
     df_copy.name = symbol
     
+    # تهيئة تفاصيل الإشارة لتجنب استخدام متغير غير معرف لاحقاً
+    signal_details = {}
     if not check_market_volatility_filter_enhanced(df_copy, symbol): return
     if not add_news_filter(): log_rejection(symbol, "News Filter Failed"); return
     if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
@@ -1262,6 +1264,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         if result:
             confirmations = result['confirmations']
             quality_score = result['quality_score']
+            # إضافة مستوى الاختراق إلى تفاصيل الإشارة
             signal_details['breakout_level'] = result['breakout_level']
     
     if confirmations is None:
@@ -2263,7 +2266,7 @@ def settings_page():
     with trade_amount_lock:
         trade_amount_min = FIXED_TRADE_AMOUNT_MIN_USDT
         trade_amount_max = FIXED_TRADE_AMOUNT_MAX_USDT
-    with trading_mode_lock: is_paper_mode = paper_trading_mode
+    with trading_mode_lock: is_paper_mode = paper_trading_mode = paper_trading_mode
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
     with strategy_config_lock:
         strategy_config = {
