@@ -1378,7 +1378,7 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         if conn: conn.rollback()
 
 # --- HTML Templates ---
-DASHBOARD_TEMPLATE = """
+DASHBOARD_TEMPLATE = """<span id="tradingStatusBadge" class="badge">متوقف</span>
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
@@ -1823,8 +1823,21 @@ function setupSorting() {
     sortButtons.forEach(button => { button.addEventListener('click', () => debouncedSort(button.dataset.sort)); });
 }
 
-async function toggleTrading() { await fetch('/toggle_trading', {method:'POST'}); }
-qs('#toggleTrading').addEventListener('change', toggleTrading);
+async function toggleTrading() {
+    try {
+        const res = await fetch('/toggle_trading', { method: 'POST' });
+        if (!res.ok) throw new Error('Server returned ' + res.status);
+        const data = await res.json();
+        const enabled = data && data.trading_enabled;
+        const statusBadge = qs('#tradingStatusBadge');
+        if (statusBadge) statusBadge.textContent = enabled ? 'تشغيل' : 'متوقف';
+        showNotification(enabled ? 'تم تفعيل التداول' : 'تم إيقاف التداول');
+    } catch (err) {
+        console.error('toggleTrading error:', err);
+        showNotification('خطأ: لم يتم تغيير حالة التداول. تحقق من الخادم.', 'error');
+    }
+}
+const __toggleEl = qs('#toggleTrading'); if(__toggleEl) __toggleEl.addEventListener('change', toggleTrading);
 
 qs('#tradingModeToggle').addEventListener('change', function() {
   const isPaper = !this.checked, modeText = isPaper ? 'ورقي' : 'حقيقي';
