@@ -1839,7 +1839,7 @@ async function toggleTrading() {
 }
 const __toggleEl = qs('#toggleTrading'); if(__toggleEl) __toggleEl.addEventListener('change', toggleTrading);
 
-qs('#tradingModeToggle').addEventListener('change', function() {
+const __modeEl = qs('#tradingModeToggle'); if(__modeEl) __modeEl.addEventListener('change', function() {
   const isPaper = !this.checked, modeText = isPaper ? 'ورقي' : 'حقيقي';
   if (!isPaper && !confirm('هل أنت متأكد من التبديل إلى التداول الحقيقي؟ هذا سيستخدم أموالاً حقيقية.')) { this.checked = false; return; }
   fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({paper_trading_mode: isPaper}) })
