@@ -110,7 +110,7 @@ HIGHER_TIMEFRAME: str = '15m'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['5m', '15m', '1h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7 
 BTC_SYMBOL: str = 'BTCUSDT'
-API_REQUEST_DELAY: float = 1
+API_REQUEST_DELAY: float = 1.3
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
