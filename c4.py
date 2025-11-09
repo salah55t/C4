@@ -1,4 +1,12 @@
-# --- الواردات الأساسية ---
+# ملف c4_rsi_strategy.py - (نسخة V34.2.0 محسّنة)
+# --- التحسينات الرئيسية:
+# 1. نظام تأكيد متعدد العوالم: RSI + EMA21 + MACD + MFI
+# 2. درجة جودة ديناميكية بناءً على 5 معايير
+# 3. التعرف على أنماط الشموع اليابانية (الثورية)
+# 4. فلتر الحجم المتقدم باستخدام MFI
+# 5. حساب نقاط المحورية لأهداف مثلى
+# 6. خيار استعادة فلتر EMA21 مع إمكانية التبديل في الإعدادات
+
 import time
 import os
 import json
@@ -25,14 +33,15 @@ from decouple import config
 from typing import List, Dict, Optional, Any
 from collections import deque
 import warnings
-from scipy.signal import argrelextrema, find_peaks
+from scipy.signal import argrelextrema
 
-# --- إعدادات التحذيرات والدقة ---
+# --- إعدادات التجاهل واللوجر ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
+
+# ضبط دقة النوع Decimal
 getcontext().prec = 18
 
-# --- إعدادات التسجيل ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -65,12 +74,12 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# --- المتغيرات العامة والإعدادات ---
+# --- متغيرات عامة وإعدادات البوت ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
 trading_mode_lock = Lock()
-usdt_balance: float = 0.0
+usdt_balance: float = 0.0 # سيحتوي دائمًا على الرصيد الحقيقي
 balance_lock = Lock()
 cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
@@ -78,29 +87,28 @@ consecutive_losses_by_symbol = {}
 consecutive_losses_lock = Lock()
 COOLDOWN_MINUTES_AFTER_SL = 30
 
-# --- المتغيرات القابلة للتعديل (أقل صرامة) ---
-PAPER_TRADE_FIXED_AMOUNT_USDT: float = 10.0
-FIXED_TRADE_AMOUNT_MIN_USDT: float = 4.5
-FIXED_TRADE_AMOUNT_MAX_USDT: float = 6.5
+# --- المتغيرات القابلة للتعديل ---
+PAPER_TRADE_FIXED_AMOUNT_USDT: float = 10.0 # قيمة ثابتة للصفقات الورقية
+FIXED_TRADE_AMOUNT_MIN_USDT: float = 4.5  # للصفقات الحقيقية فقط
+FIXED_TRADE_AMOUNT_MAX_USDT: float = 6.5  # للصفقات الحقيقية فقط
 trade_amount_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.0
-MIN_SIGNAL_QUALITY: int = 60  # تخفيض من 70
+MIN_SIGNAL_QUALITY: int = 70
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
 min_quality_lock = Lock()
 
-# --- مفاتيح تفعيل الاستراتيجيات ---
+# --- مفاتيح تفعيل الاستراتيجيات (الآن استراتيجية واحدة فقط) ---
 STRATEGY_NAMES = {
-    "RSI_Enhanced_Strategy": "RSI ارتداد محسّن",
-    "Breakout_Strategy": "اختراق ديناميكي"
+    "RSI_Enhanced_Strategy": "RSI Enhanced (RSI مُحسّن)"
 }
 strategy_filters_lock = Lock()
 
-# --- إعدادات عامة ---
+# --- إعدادات عامة (معدلة لإطار 5 دقائق) ---
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 HIGHER_TIMEFRAME: str = '15m'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['5m', '15m', '1h']
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7 
 BTC_SYMBOL: str = 'BTCUSDT'
 API_REQUEST_DELAY: float = 1
 
@@ -122,15 +130,15 @@ rejection_logs_lock = Lock()
 current_market_state: Dict[str, Any] = {"trend_details_by_tf": {}}
 market_state_lock = Lock()
 
-# --- إعدادات الاستراتيجية (يمكن التحكم فيها) ---
+# --- [جديد] متغيرات إعدادات الاستراتيجية ---
 ENABLE_EMA_FILTER: bool = True
 ENABLE_MACD_CONFIRMATION: bool = True
 ENABLE_MFI_FILTER: bool = True
 ENABLE_CANDLESTICK_PATTERNS: bool = True
-REQUIRED_CONFIRMATIONS: int = 2  # تخفيض من 3
+REQUIRED_CONFIRMATIONS: int = 3
 strategy_config_lock = Lock()
 
-# --- قاموس أسباب الرفض (محدث) ---
+# --- قاموس أسباب الرفض باللغة العربية (محدث) ---
 REJECTION_REASONS_AR = {
     # General Filters
     "Market Volatility Filter Failed": "فلتر تقلب السوق رفض الدخول",
@@ -151,8 +159,7 @@ REJECTION_REASONS_AR = {
     "MFI: Low volume pressure": "MFI: ضغط حجم ضعيف",
     "Candlestick: No bullish pattern": "الشموع: لا يوجد نمط صعودي مؤكد",
     "Insufficient confirmations": "تأكيدات غير كافية",
-    "Multiple conditions failed": "عدة شروط تأكيد فشلت",
-    "Breakout: No level broken": "اختراق: لم يتم كسر مستوى مقاومة"
+    "Multiple conditions failed": "عدة شروط تأكيد فشلت"
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -181,7 +188,7 @@ def broadcast(data: Dict):
 
 def get_dashboard_payload() -> Dict:
     with trading_status_lock: trading_enabled = is_trading_enabled
-    with trading_mode_lock: is_paper_mode = paper_trading_mode = paper_trading_mode
+    with trading_mode_lock: is_paper_mode = paper_trading_mode
     with balance_lock: current_balance = usdt_balance
     with notifications_lock: notifications = list(notifications_cache)
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
@@ -218,7 +225,7 @@ def get_dashboard_payload() -> Dict:
         "server_time": datetime.now(timezone.utc).isoformat()
     }
 
-# --- دوال المساعدة (DB, Redis) ---
+# --- باقي دوال المساعدة (unchanged) ---
 def optimize_database():
     if not check_db_connection() or not conn:
         return
@@ -392,6 +399,7 @@ def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: f
     trade_type = "حقيقية" if is_real else "ورقية"
     emoji = "🔥" if is_real else "📊"
     
+    # إنشاء قائمة التأكيدات
     confirms_list = "\n".join([f"✅ {k.replace('_', ' ').title()}: {'نعم' if v else 'لا'}" for k, v in confirmations.items()])
     
     message = (
@@ -414,7 +422,7 @@ def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: f
     
     send_enhanced_telegram_message(message, force=True)
 
-# --- دوال التقارير والإشعارات ---
+# --- (Other helper functions like reports, websocket, etc. remain the same) ---
 def send_daily_performance_report():
     if not check_db_connection() or not conn:
         return
@@ -572,8 +580,8 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return validated
     except Exception as e:
         logger.error(f"❌ [Symbols] Error validating symbols: {e}"); return []
+# --- نهاية دوال المساعدة ---
 
-# --- دوال جلب ومعالجة البيانات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     time.sleep(API_REQUEST_DELAY)
     try:
@@ -588,50 +596,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
-def merge_close_levels(levels: List[float], threshold: float = 0.01) -> List[float]:
-    """دمج المستويات المتقاربة جداً"""
-    if not levels:
-        return []
-    
-    merged = []
-    levels_sorted = sorted(levels)
-    current_cluster = [levels_sorted[0]]
-    
-    for level in levels_sorted[1:]:
-        if abs(level - current_cluster[-1]) / current_cluster[-1] <= threshold:
-            current_cluster.append(level)
-        else:
-            merged.append(sum(current_cluster) / len(current_cluster))
-            current_cluster = [level]
-    
-    merged.append(sum(current_cluster) / len(current_cluster))
-    return merged
-
-def find_support_resistance_levels(df: pd.DataFrame, window: int = 20, 
-                                   prominence: float = 0.02) -> Dict[str, List[float]]:
-    """
-    تحديد المستويات بناءً على القمم والقيعان المحلية
-    """
-    highs = df['high'].values
-    lows = df['low'].values
-    
-    # العثور على القمم (resistances)
-    peaks_idx, _ = find_peaks(highs, distance=window, prominence=prominence)
-    resistances = highs[peaks_idx].tolist()
-    
-    # العثور على القيعان (supports)
-    troughs_idx, _ = find_peaks(-lows, distance=window, prominence=prominence)
-    supports = lows[troughs_idx].tolist()
-    
-    # تصفية المستويات المتقاربة (دمج)
-    resistances = merge_close_levels(resistances, threshold=0.01)
-    supports = merge_close_levels(supports, threshold=0.01)
-    
-    return {
-        'resistances': sorted(resistances)[-5:],  # آخر 5 مقاومات
-        'supports': sorted(supports)[:5]          # أول 5 دعوم
-    }
-
+# --- [محدثة] حسابات المؤشرات المتقدمة ---
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     
@@ -669,11 +634,12 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
     
+    # Use EWMA (Wilder's smoothing) for 14-period
     avg_gain_14 = gain.ewm(com=14 - 1, adjust=False).mean()
     avg_loss_14 = loss.ewm(com=14 - 1, adjust=False).mean()
     
     rs_14 = avg_gain_14 / avg_loss_14.replace(0, 1e-9)
-    df_calc['rsi'] = 100.0 - (100.0 / (1.0 + rs_14))
+    df_calc['rsi'] = 100.0 - (100.0 / (1.0 + rs_14)) # Overwrite the old 'rsi'
     
     # --- Bollinger Bands ---
     bb_middle = df_calc['close'].rolling(window=20).mean()
@@ -705,7 +671,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- VWAP ---
     df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
     
-    # --- MFI (Money Flow Index) ---
+    # --- [جديد] MFI (Money Flow Index) ---
     typical_price = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
     money_flow = typical_price * df_calc['volume']
     positive_flow = money_flow.where(typical_price.diff() > 0, 0)
@@ -715,7 +681,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     money_ratio = positive_flow_sum / negative_flow_sum.replace(0, 1e-9)
     df_calc['mfi'] = 100 - (100 / (1 + money_ratio))
     
-    # --- Pivot Points ---
+    # --- [جديد] Pivot Points ---
     df_calc['pivot'] = (df_calc['high'].shift(1) + df_calc['low'].shift(1) + df_calc['close'].shift(1)) / 3
     df_calc['r1'] = 2 * df_calc['pivot'] - df_calc['low'].shift(1)
     df_calc['s1'] = 2 * df_calc['pivot'] - df_calc['high'].shift(1)
@@ -724,7 +690,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     
     return df_calc
 
-# --- إدارة الإعدادات والبيانات ---
+# --- Data Loading & Settings Management (unchanged) ---
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
     try:
@@ -767,8 +733,9 @@ def load_settings_from_redis():
         quality_settings_data = redis_client.get('signal_quality_settings')
         if quality_settings_data:
             quality_settings = json.loads(quality_settings_data)
-            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 60)
+            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 70)
             
+        # [جديد] تحميل إعدادات الاستراتيجية
         strategy_config_data = redis_client.get('strategy_config')
         if strategy_config_data:
             strategy_config = json.loads(strategy_config_data)
@@ -777,7 +744,7 @@ def load_settings_from_redis():
                 ENABLE_MACD_CONFIRMATION = strategy_config.get('enable_macd_confirmation', True)
                 ENABLE_MFI_FILTER = strategy_config.get('enable_mfi_filter', True)
                 ENABLE_CANDLESTICK_PATTERNS = strategy_config.get('enable_candlestick_patterns', True)
-                REQUIRED_CONFIRMATIONS = strategy_config.get('required_confirmations', 2)
+                REQUIRED_CONFIRMATIONS = strategy_config.get('required_confirmations', 3)
         
         logger.info("✅ [Redis] Successfully loaded settings from Redis.")
     except Exception as e:
@@ -800,6 +767,7 @@ def save_settings_to_redis():
         quality_settings = {'min_quality': MIN_SIGNAL_QUALITY}
         redis_client.set('signal_quality_settings', json.dumps(quality_settings))
         
+        # [جديد] حفظ إعدادات الاستراتيجية
         strategy_config = {
             'enable_ema_filter': ENABLE_EMA_FILTER,
             'enable_macd_confirmation': ENABLE_MACD_CONFIRMATION,
@@ -816,12 +784,18 @@ def save_settings_to_redis():
         logger.error(f"Error saving settings to Redis: {e}")
         return False
 
-# --- الفلاتر العامة ---
+# --- Data Loading & Settings Management (unchanged) ---
+
+# --- الفلاتر الديناميكية ونظام السوق ---
+# تم حذف جميع دوال الفلاتر الديناميكية (check_..._dynamic_filters) لأنها خاصة بالاستراتيجيات القديمة
+# تم حذف دالة get_wave_retracement
+
+# --- General Filters (unchanged) ---
 def add_news_filter() -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
     now = datetime.now(timezone.utc)
     for hour, minute in news_hours:
-        if now.hour == hour and abs(now.minute - minute) <= 15:
+        if now.hour == hour and abs(now.minute - minute) <= 15: # Reduced window for 5m
             return False
     return True
 
@@ -849,8 +823,9 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
-    ATR_PERCENT_MIN = 0.25  # تخفيض من 0.35
-    ATR_PERCENT_MAX = 4.0   # رفع من 3.2
+    # --- إصلاح: تم تخفيض الحد الأدنى للسماح بالتداول في الأسواق الهادئة ---
+    ATR_PERCENT_MIN = 0.35
+    ATR_PERCENT_MAX = 3.2
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
         log_rejection(symbol, "Market Volatility Filter Failed", {
@@ -861,19 +836,20 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     return True
 
-# --- إدارة المخاطر والأهداف ---
+# --- Dynamic Stop Loss & Take Profit (unchanged) ---
 def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     last = df.iloc[-1]
     atr_value = last.get('atr', 0)
     
-    stop_loss = entry_price - (atr_value * 2.0)
+    stop_loss = entry_price - (atr_value * 2.0) # قيمة افتراضية
     
-    if strategy_name == "RSI_Enhanced_Strategy":
+    if strategy_name == "RSI_Enhanced_Strategy": # تم تحديث الاسم
+        # استخدام ATR كمحدد لوقف الخسارة لاستراتيجية الارتداد
         recent_low = df['low'].tail(5).min()
         stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.8))
-    elif strategy_name == "Breakout_Strategy":
-        # وقف الخسارة أعمق للاختراقات لتجنب الفخاخ
-        stop_loss = entry_price - (atr_value * 2.5)
+    else:
+        # الحالة الافتراضية (Fallback)
+        stop_loss = entry_price - (atr_value * 2.0)
     
     max_stop_distance = entry_price * 0.05
     if entry_price - stop_loss > max_stop_distance:
@@ -883,58 +859,36 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
 
 def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str) -> tuple:
     risk_amount = entry_price - stop_loss
-    if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.025)
+    if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.025) # Default for 5m
 
-    if strategy_name == "RSI_Enhanced_Strategy": rr1, rr2 = 1.8, 3.0
-    elif strategy_name == "Breakout_Strategy": rr1, rr2 = 2.0, 3.5  # أهداف أعلى للاختراقات
+    # Risk-Reward Ratios adjusted for 5m timeframe (Scalping)
+    if strategy_name == "RSI_Enhanced_Strategy": rr1, rr2 = 1.8, 3.0 # نسب جيدة لاستراتيجية ارتداد (تم تحديث الاسم)
     else: rr1, rr2 = 1.6, 2.8
         
     target1 = entry_price + (risk_amount * rr1)
     target2 = entry_price + (risk_amount * rr2)
     
-    # استخدام نقاط المحورية كأهداف إضافية
-    if 'r2' in df.columns:
+    # [جديد] استخدام نقاط المحورية كأهداف إضافية
+    if 'r1' in df.columns:
+        r1 = df.iloc[-1].get('r1', target1)
         r2 = df.iloc[-1].get('r2', target2)
-        target2 = max(target2, r2 * 0.99)
+        target1 = max(target1, r1 * 0.98) # ضمان أن الهدف ليس بعيداً جداً
+        target2 = max(target2, r2 * 0.98)
     
     return target1, target2
 
-# --- دوال الاستراتيجيات ---
-def detect_bullish_candlestick_pattern(df: pd.DataFrame) -> bool:
-    """تكتشف الأنماط الصعودية: Hammer, Bullish Engulfing, Morning Star"""
-    if len(df) < 3:
-        return False
-    
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    prev2 = df.iloc[-3]
-    
-    body = abs(last['close'] - last['open'])
-    lower_shadow = min(last['open'], last['close']) - last['low']
-    upper_shadow = last['high'] - max(last['open'], last['close'])
-    
-    # Hammer pattern
-    is_hammer = body > 0 and lower_shadow > 2 * body and upper_shadow < 0.5 * body
-    
-    # Bullish Engulfing
-    prev_body = abs(prev['close'] - prev['open'])
-    prev_is_red = prev['close'] < prev['open']
-    current_is_green = last['close'] > last['open']
-    is_engulfing = prev_is_red and current_is_green and last['close'] > prev['open'] and last['open'] < prev['close']
-    
-    # Morning Star
-    star_body_small = abs(prev['close'] - prev['open']) < 0.3 * abs(prev2['close'] - prev2['open'])
-    prev2_is_red = prev2['close'] < prev2['open']
-    is_morning_star = prev2_is_red and star_body_small and current_is_green and last['close'] > prev2['open']
-    
-    return is_hammer or is_engulfing or is_morning_star
-
-def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> Optional[Dict[str, Any]]:
+# --- [محدّثة] استراتيجية RSI المتقدمة مع تأكيدات متعددة ---
+def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
-    استراتيجية RSI المُحسّنة مع تأكيدات متعددة - تُرجع قاموس التأكيدات والجودة
+    استراتيجية RSI المُحسّنة مع تأكيدات متعددة:
+    - RSI: اختراق صعودي لمستوى 30
+    - EMA21: السعر أعلى من المتوسط المتحرك (اختياري)
+    - MACD: زخم صعودي
+    - MFI: ضغط حجم قوي
+    - Candlestick: نمط صعودي مؤكد
     """
     if len(df) < 50: 
-        return None
+        return False
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -956,7 +910,7 @@ def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> Optional[D
     if ema_enabled:
         confirmations['ema_trend'] = last['close'] > last['ema21']
     else:
-        confirmations['ema_trend'] = True
+        confirmations['ema_trend'] = True  # إذا كان معطل، يعتبر شرطاً صحيحاً
     
     # 3. تأكيد MACD
     with strategy_config_lock:
@@ -970,7 +924,7 @@ def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> Optional[D
     with strategy_config_lock:
         mfi_enabled = ENABLE_MFI_FILTER
     if mfi_enabled:
-        confirmations['mfi_pressure'] = last['mfi'] > 20
+        confirmations['mfi_pressure'] = last['mfi'] > 20  # فوق مستوى التشبع البيعي للحجم
     else:
         confirmations['mfi_pressure'] = True
     
@@ -991,130 +945,57 @@ def check_rsi_enhanced_strategy(df: pd.DataFrame, mtf_trend: Dict) -> Optional[D
     # تسجيل أسباب الرفض للتصحيح
     if not confirmations['rsi_crossover']:
         log_rejection(df.name if hasattr(df, 'name') else 'Unknown', "RSI: No bullish crossover")
-        return None
+        return False
     
     if active_confirmations < required:
         failed_conditions = [k for k, v in confirmations.items() if not v]
         log_rejection(df.name if hasattr(df, 'name') else 'Unknown', 
                      f"Insufficient confirmations ({active_confirmations}/{required})", 
                      {"failed": ', '.join(failed_conditions)})
-        return None
+        return False
     
-    # درجة جودة ديناميكية
-    quality_score = calculate_dynamic_quality_score(df, df.name if hasattr(df, 'name') else 'Unknown')
-    
-    logger.info(f"✅ [Enhanced RSI Signal] All {active_confirmations}/{required} confirmations met for {df.name if hasattr(df, 'name') else 'Unknown'}. Score: {quality_score}")
-    
-    return {
-        'confirmations': confirmations,
-        'quality_score': quality_score
-    }
+    # إذا وصلنا هنا، يعني أن جميع التأكيدات المطلوبة تم تحقيقها
+    logger.info(f"✅ [Enhanced RSI Signal] All {active_confirmations}/{required} confirmations met for {df.name if hasattr(df, 'name') else 'Unknown'}.")
+    # نحفظ التأكيدات في البيانات الوصفية للإشارة
+    df.confirmations = confirmations
+    return True
 
-def check_breakout_strategy(df: pd.DataFrame, mtf_trend: Dict) -> Optional[Dict[str, Any]]:
+# --- [جديد] دالة كشف أنماط الشموع اليابانية ---
+def detect_bullish_candlestick_pattern(df: pd.DataFrame) -> bool:
     """
-    استراتيجية الاختراق مع تأكيدات متعددة
+    تكتشف الأنماط الصعودية:
+    - Hammer / Inverted Hammer
+    - Bullish Engulfing
+    - Morning Star (مبسطة)
     """
-    if len(df) < 100:
-        return None
+    if len(df) < 3:
+        return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
     
-    # تحديد المقاومة الديناميكية
-    resistance_levels = find_support_resistance_levels(df, window=20)
-    if not resistance_levels['resistances']:
-        return None
+    # Hammer pattern
+    body = abs(last['close'] - last['open'])
+    lower_shadow = min(last['open'], last['close']) - last['low']
+    upper_shadow = last['high'] - max(last['open'], last['close'])
     
-    # أقرب مقاومة
-    nearest_resistance = min(resistance_levels['resistances'], key=lambda x: abs(x - last['close']))
+    is_hammer = body > 0 and lower_shadow > 2 * body and upper_shadow < 0.3 * body
     
-    confirmations = {
-        'price_breakout': False,
-        'volume_confirmation': False,
-        'rsi_momentum': False,
-        'macd_cross': False,
-        'ema_support': False
-    }
+    # Bullish Engulfing
+    prev_body = abs(prev['close'] - prev['open'])
+    prev_is_red = prev['close'] < prev['open']
+    current_is_green = last['close'] > last['open']
+    is_engulfing = prev_is_red and current_is_green and last['close'] > prev['open'] and last['open'] < prev['close']
     
-    # 1. اختراق السعر (1% فوق المقاومة)
-    confirmations['price_breakout'] = last['close'] > nearest_resistance * 1.01
+    # Morning Star (مبسطة)
+    star_body_small = abs(prev['close'] - prev['open']) < 0.3 * abs(prev2['close'] - prev2['open'])
+    prev2_is_red = prev2['close'] < prev2['open']
+    is_morning_star = prev2_is_red and star_body_small and current_is_green and last['close'] > prev2['open']
     
-    # 2. ضغط حجم (MFI > 50)
-    confirmations['volume_confirmation'] = last['mfi'] > 50
-    
-    # 3. RSI قوي
-    confirmations['rsi_momentum'] = last['rsi'] > 60
-    
-    # 4. MACD يعبر للأعلى
-    confirmations['macd_cross'] = prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal']
-    
-    # 5. دعم EMA21
-    confirmations['ema_support'] = last['close'] > last['ema21']
-    
-    # عدد التأكيدات المطلوبة
-    with strategy_config_lock:
-        required = REQUIRED_CONFIRMATIONS
-    
-    active_confirmations = sum(confirmations.values())
-    
-    if active_confirmations < required:
-        return None
-    
-    # درجة جودة للاختراق
-    quality_score = min(active_confirmations * 25, 100)
-    
-    logger.info(f"✅ [Breakout Signal] All {active_confirmations}/{required} confirmations met for {df.name if hasattr(df, 'name') else 'Unknown'}. Score: {quality_score}")
-    
-    return {
-        'confirmations': confirmations,
-        'quality_score': quality_score,
-        'breakout_level': nearest_resistance
-    }
+    return is_hammer or is_engulfing or is_morning_star
 
-def calculate_dynamic_quality_score(df: pd.DataFrame, symbol: str) -> int:
-    """
-    حساب درجة الجودة بناءً على 5 معايير (كل معيار 20 نقطة) - أقل صرامة
-    """
-    if len(df) < 2:
-        return 0
-    
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    score = 0
-    
-    # 1. RSI Crossover Strength (20 نقطة) - كل 2 فوق 30 = 1 نقطة
-    if prev['rsi'] < 30 and last['rsi'] >= 30:
-        rsi_strength = min((last['rsi'] - 30) / 2, 20)
-        score += rsi_strength
-    
-    # 2. EMA21 Distance (20 نقطة)
-    ema_distance = ((last['close'] - last['ema21']) / last['ema21']) * 100
-    if ema_distance > 0:
-        ema_score = min(ema_distance * 4, 20)
-        score += ema_score
-    
-    # 3. MACD Momentum (20 نقطة)
-    macd_strength = last['macd_hist']
-    if macd_strength > 0:
-        macd_score = min(macd_strength / abs(last['macd_signal']) * 20, 20)
-        score += macd_score
-    
-    # 4. MFI Volume Pressure (20 نقطة)
-    if last['mfi'] > 20:
-        mfi_score = min((last['mfi'] - 20) / 80 * 20, 20)
-        score += mfi_score
-    
-    # 5. ATR Volatility (20 نقطة) - نطاق أوسع
-    atr_percent = last['atr_percent']
-    if 0.5 <= atr_percent <= 1.5:
-        score += 20
-    elif atr_percent > 0.25 and atr_percent < 4.0:
-        score += 10
-    
-    return int(min(score, 100))
-
-# --- إدارة الصفقات ---
+# --- (Rest of the functions remain the same) ---
 def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
     """
     Formats the quantity to the correct precision required by Binance API for a specific symbol.
@@ -1132,7 +1013,11 @@ def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
         
         step_size = Decimal(lot_size_filter['stepSize'])
         
+        # Quantize the number to the step size (e.g., 0.01 for 2 decimal places)
+        # This correctly formats the number by rounding down to the nearest valid trade amount.
         formatted_quantity = quantity.quantize(step_size, rounding=ROUND_DOWN)
+
+        # Return as a plain string without scientific notation or extra trailing zeros.
         return f"{formatted_quantity.normalize()}"
         
     except Exception as e:
@@ -1238,48 +1123,27 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
         return None
 
+# --- [محدثة] إنشاء إشارة التداول مع درجة جودة ديناميكية ---
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
-    # نسخة مهمة لتجنب تعديل DataFrame الأصلي
-    df_copy = df.copy()
-    df_copy.name = symbol
+    df.strategy = strategy_name 
     
-    # تهيئة تفاصيل الإشارة لتجنب استخدام متغير غير معرف لاحقاً
-    signal_details = {}
-    if not check_market_volatility_filter_enhanced(df_copy, symbol): return
+    if not check_market_volatility_filter_enhanced(df, symbol): return
     if not add_news_filter(): log_rejection(symbol, "News Filter Failed"); return
     if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
     if not add_correlation_filter(symbol): log_rejection(symbol, "Correlation Filter Failed"); return
 
-    confirmations = None
-    quality_score = 0
+    # درجة جودة ديناميكية بناءً على 5 معايير
+    quality_score = calculate_dynamic_quality_score(df, symbol)
     
-    # جلب التأكيدات حسب الاستراتيجية
-    if strategy_name == "RSI_Enhanced_Strategy":
-        result = check_rsi_enhanced_strategy(df_copy, {})
-        if result:
-            confirmations = result['confirmations']
-            quality_score = result['quality_score']
-    elif strategy_name == "Breakout_Strategy":
-        result = check_breakout_strategy(df_copy, {})
-        if result:
-            confirmations = result['confirmations']
-            quality_score = result['quality_score']
-            # إضافة مستوى الاختراق إلى تفاصيل الإشارة
-            signal_details['breakout_level'] = result['breakout_level']
-    
-    if confirmations is None:
-        return
-
     with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
     if quality_score < min_score:
         log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
         return
-    
     logger.info(f"⭐ [Signal Quality] {symbol} ({strategy_name}): {quality_score}/100")
 
-    entry_price = df_copy.iloc[-1]['close']
-    stop_loss_price = calculate_dynamic_stop_loss(df_copy, entry_price, strategy_name)
-    target_price_1, target_price_2 = calculate_dynamic_take_profit(df_copy, entry_price, stop_loss_price, strategy_name)
+    entry_price = df.iloc[-1]['close']
+    stop_loss_price = calculate_dynamic_stop_loss(df, entry_price, strategy_name)
+    target_price_1, target_price_2 = calculate_dynamic_take_profit(df, entry_price, stop_loss_price, strategy_name)
     
     if stop_loss_price >= entry_price:
         log_rejection(symbol, "Invalid Position Size", {"entry": entry_price, "sl": stop_loss_price})
@@ -1287,16 +1151,19 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
 
     with trading_mode_lock: is_real = not paper_trading_mode
     
+    # جلب التأكيدات إن وجدت
+    confirmations = getattr(df, 'confirmations', {})
+    
     signal_details = {
-        "atr": df_copy.iloc[-1].get('atr', 0), 
+        "atr": df.iloc[-1].get('atr', 0), 
         "trailing_stop_activated": False, 
         "tp1_done": False,
         "quality_score": quality_score, 
-        "atr_percent": df_copy.iloc[-1].get('atr_percent', 0),
-        "rsi_at_signal": df_copy.iloc[-1].get('rsi', 0),
-        "confirmations": confirmations,
-        "mfi_at_signal": df_copy.iloc[-1].get('mfi', 0),
-        "macd_hist_at_signal": df_copy.iloc[-1].get('macd_hist', 0)
+        "atr_percent": df.iloc[-1].get('atr_percent', 0),
+        "rsi_at_signal": df.iloc[-1].get('rsi', 0),
+        "confirmations": confirmations,  # [جديد]
+        "mfi_at_signal": df.iloc[-1].get('mfi', 0),  # [جديد]
+        "macd_hist_at_signal": df.iloc[-1].get('macd_hist', 0)  # [جديد]
     }
     
     trade_levels = {
@@ -1337,19 +1204,69 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             send_trade_open_notification(
                 symbol, strategy_name, float(avg_fill_price),
                 stop_loss_price, target_price_1, target_price_2, float(final_quantity),
-                is_real, quality_score, df_copy.iloc[-1].get('atr_percent', 0), notional_value, confirmations
+                is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value, confirmations
             )
         except BinanceAPIException as e:
             logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
             send_enhanced_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\n`{e}`", force=True)
         except Exception as e:
             logger.error(f"❌ [Real Trade] CRITICAL ERROR creating real trade for {symbol}: {e}", exc_info=True)
-    else:
+    else: # Paper Trading
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, float(quantity_dec), signal_details)
         send_trade_open_notification(
             symbol, strategy_name, entry_price, stop_loss_price, target_price_1, target_price_2,
-            float(quantity_dec), is_real, quality_score, df_copy.iloc[-1].get('atr_percent', 0), notional_value, confirmations
+            float(quantity_dec), is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value, confirmations
         )
+        # لا يتم خصم أي شيء من الرصيد في الصفقات الورقية
+
+# --- [جديد] حساب درجة جودة ديناميكية ---
+def calculate_dynamic_quality_score(df: pd.DataFrame, symbol: str) -> int:
+    """
+    حساب درجة الجودة بناءً على 5 معايير (كل معيار 20 نقطة):
+    1. قوة اختراق RSI (مدى الارتفاع عن 30)
+    2. بعد السعر عن EMA21 (كلما كان أعلى كانت الجودة أفضل)
+    3. قوة زخم MACD (حجم الهيستوجرام)
+    4. ضغط الحجم (MFI)
+    5. تقلب السوق (ATR في المستوى المثالي)
+    """
+    if len(df) < 2:
+        return 0
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    score = 0
+    
+    # 1. RSI Crossover Strength (20 points)
+    if prev['rsi'] < 30 and last['rsi'] >= 30:
+        rsi_strength = min((last['rsi'] - 30) / 10 * 20, 20)  # كل 1 نقطة فوق 30 = 2 نقاط
+        score += rsi_strength
+    
+    # 2. EMA21 Distance (20 points)
+    ema_distance = ((last['close'] - last['ema21']) / last['ema21']) * 100
+    if ema_distance > 0:
+        ema_score = min(ema_distance * 4, 20)  # كل 0.5% = 2 نقاط
+        score += ema_score
+    
+    # 3. MACD Momentum (20 points)
+    macd_strength = last['macd_hist']
+    if macd_strength > 0:
+        macd_score = min(macd_strength / abs(last['macd_signal']) * 20, 20)
+        score += macd_score
+    
+    # 4. MFI Volume Pressure (20 points)
+    if last['mfi'] > 20:
+        mfi_score = min((last['mfi'] - 20) / 80 * 20, 20)
+        score += mfi_score
+    
+    # 5. ATR Volatility (20 points) - المستوى المثالي 0.5-1.5%
+    atr_percent = last['atr_percent']
+    if 0.5 <= atr_percent <= 1.5:
+        score += 20
+    elif atr_percent > 0.35 and atr_percent < 3.0:
+        score += 10  # نصف النقاط إذا كان في نطاق مقبول
+    
+    return int(min(score, 100))
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -1377,8 +1294,9 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         logger.error(f"❌ [DB] CRITICAL ERROR saving signal for {symbol}: {e}", exc_info=True)
         if conn: conn.rollback()
 
-# --- HTML Templates ---
-DASHBOARD_TEMPLATE = """<span id="tradingStatusBadge" class="badge">متوقف</span>
+
+# --- HTML Templates (تحديثها مع خيارات الاستراتيجية الجديدة) ---
+DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
@@ -1536,13 +1454,13 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
       <div class="card">
         <h2>سجل الرفض</h2>
         <div class="card-body" style="padding:0; max-height: 250px; overflow-y: auto;">
-          <table class="table" id="rejections"><thead><tr><th>وقت</th><th>الرمز</th><th>السبب</th></tr></thead><tbody></tbody></table>
+          <table class="table" id="rejections"><thead><tr><th>الوقت</th><th>الرمز</th><th>السبب</th></tr></thead><tbody></tbody></table>
         </div>
       </div>
       <div class="card">
         <h2>سجل الأحداث</h2>
         <div class="card-body" style="padding:0; max-height: 250px; overflow-y: auto;">
-          <table class="table" id="events"><thead><tr><th>وقت</th><th>النوع</th><th>الرسالة</th></tr></thead><tbody></tbody></table>
+          <table class="table" id="events"><thead><tr><th>الوقت</th><th>النوع</th><th>الرسالة</th></tr></thead><tbody></tbody></table>
         </div>
       </div>
     </div>
@@ -1614,6 +1532,7 @@ function renderSignal(signal) {
     const qualityColor = qualityScore > 75 ? 'var(--ok)' : qualityScore > 55 ? 'var(--warn)' : 'var(--bad)';
     const strategyName = signal.strategy_name.replace(/_/g, " ").replace("Strategy", "");
     
+    // [جديد] عرض التأكيدات
     const confirmations = signal.signal_details?.confirmations || {};
     const confirmationsHtml = Object.entries(confirmations).map(([key, value]) => 
         `<div class="confirmation-item">
@@ -1737,7 +1656,7 @@ async function initializeDashboard() {
         showLoadingIndicator('#signals');
         const [baseRes, signalsRes, metricsRes] = await Promise.all([
             fetch('/api/dashboard_data'), fetch('/api/open_signals'), fetch('/api/performance_metrics')
-        });
+        ]);
         const baseData = await baseRes.json();
         const signalsData = await signalsRes.json();
         const metricsData = await metricsRes.json();
@@ -1823,23 +1742,10 @@ function setupSorting() {
     sortButtons.forEach(button => { button.addEventListener('click', () => debouncedSort(button.dataset.sort)); });
 }
 
-async function toggleTrading() {
-    try {
-        const res = await fetch('/toggle_trading', { method: 'POST' });
-        if (!res.ok) throw new Error('Server returned ' + res.status);
-        const data = await res.json();
-        const enabled = data && data.trading_enabled;
-        const statusBadge = qs('#tradingStatusBadge');
-        if (statusBadge) statusBadge.textContent = enabled ? 'تشغيل' : 'متوقف';
-        showNotification(enabled ? 'تم تفعيل التداول' : 'تم إيقاف التداول');
-    } catch (err) {
-        console.error('toggleTrading error:', err);
-        showNotification('خطأ: لم يتم تغيير حالة التداول. تحقق من الخادم.', 'error');
-    }
-}
-const __toggleEl = qs('#toggleTrading'); if(__toggleEl) __toggleEl.addEventListener('change', toggleTrading);
+async function toggleTrading() { await fetch('/toggle_trading', {method:'POST'}); }
+qs('#toggleTrading').addEventListener('change', toggleTrading);
 
-const __modeEl = qs('#tradingModeToggle'); if(__modeEl) __modeEl.addEventListener('change', function() {
+qs('#tradingModeToggle').addEventListener('change', function() {
   const isPaper = !this.checked, modeText = isPaper ? 'ورقي' : 'حقيقي';
   if (!isPaper && !confirm('هل أنت متأكد من التبديل إلى التداول الحقيقي؟ هذا سيستخدم أموالاً حقيقية.')) { this.checked = false; return; }
   fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({paper_trading_mode: isPaper}) })
@@ -1869,7 +1775,7 @@ function createPerformanceChart(chartData) {
     performanceChartInstance = new Chart(ctx, {
         type: 'line',
         data: { labels: chartData.labels, datasets: [{ label: 'رأس المال', data: chartData.values, borderColor: '#3aa0ff', backgroundColor: 'rgba(58, 160, 255, 0.1)', tension: 0.4, fill: true, pointRadius: 0, borderWidth: 2 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { type: 'time', time: { unit: 'day' }, ticks: { color: 'var(--muted)', autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } }, y: { ticks: { color: 'var(--muted)', callback: (v) => v.toFixed(0) }, grid: { color: 'rgba(255, 255, 255, 0.05)' } } }
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { type: 'time', time: { unit: 'day' }, ticks: { color: 'var(--muted)', autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } }, y: { ticks: { color: 'var(--muted)', callback: (v) => v.toFixed(0) }, grid: { color: 'rgba(255, 255, 255, 0.05)' } } } }
     });
 }
 
@@ -1955,7 +1861,7 @@ h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
             </div>
         </div>
 
-        <!-- إعدادات الاستراتيجية -->
+        <!-- [جديد] إعدادات الاستراتيجية -->
         <div class="card" style="margin-top: 16px;">
             <h2>إعدادات الاستراتيجية المتقدمة</h2>
             <div class="card-body form-grid">
@@ -2108,6 +2014,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 #loader {text-align: center; padding: 40px; display: none;}
 .loader-text { margin-top: 10px; color: var(--muted); }
 .loading-spinner { border: 3px solid rgba(255, 255, 255, 0.1); border-radius: 50%; border-top: 3px solid #3aa0ff; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto; }
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -2268,7 +2175,7 @@ function updateEquityChart(equityData) {
 </html>
 """
 
-# --- مسارات Flask ---
+# --- مسارات Flask (تحديثها) ---
 @app.route('/')
 def dashboard(): return render_template_string(DASHBOARD_TEMPLATE)
 @app.route('/backtest')
@@ -2279,7 +2186,7 @@ def settings_page():
     with trade_amount_lock:
         trade_amount_min = FIXED_TRADE_AMOUNT_MIN_USDT
         trade_amount_max = FIXED_TRADE_AMOUNT_MAX_USDT
-    with trading_mode_lock: is_paper_mode = paper_trading_mode = paper_trading_mode
+    with trading_mode_lock: is_paper_mode = paper_trading_mode
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
     with strategy_config_lock:
         strategy_config = {
@@ -2336,6 +2243,7 @@ def update_settings():
         logger.error(f"Error updating settings: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
+# [جديد] مسار إعدادات الاستراتيجية
 @app.route('/api/strategy_config', methods=['POST'])
 def update_strategy_config():
     try:
@@ -2346,13 +2254,14 @@ def update_strategy_config():
             ENABLE_MACD_CONFIRMATION = bool(data.get('enable_macd_confirmation', True))
             ENABLE_MFI_FILTER = bool(data.get('enable_mfi_filter', True))
             ENABLE_CANDLESTICK_PATTERNS = bool(data.get('enable_candlestick_patterns', True))
-            REQUIRED_CONFIRMATIONS = int(data.get('required_confirmations', 2))
+            REQUIRED_CONFIRMATIONS = int(data.get('required_confirmations', 3))
         save_settings_to_redis()
         return jsonify({"success": True, "message": "Strategy config updated successfully"})
     except Exception as e:
         logger.error(f"Error updating strategy config: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
+# (Rest of the Flask routes remain the same)
 @app.route('/api/health')
 def api_health():
     try:
@@ -2360,7 +2269,6 @@ def api_health():
         with trading_mode_lock: is_paper = paper_trading_mode
         return jsonify({"status": "ok", "trading_enabled": trading_enabled, "mode": "PAPER" if is_paper else "REAL", "open_signals": len(open_signals_cache), "ws": {"connected": True}}), 200
     except Exception as e: return jsonify({"status": "error", "message": str(e)}), 500
-
 @app.route('/api/open_signals')
 def get_open_signals():
     if not check_db_connection(): return jsonify({"error": "Database connection failed"}), 500
@@ -2378,7 +2286,6 @@ def get_open_signals():
     except Exception as e:
         logger.error(f"Error fetching open signals: {e}")
         return jsonify({"error": str(e)}), 500
-
 @app.route('/api/performance_metrics')
 def get_performance_metrics():
     cache_key = "performance_metrics_30d"
@@ -2410,7 +2317,31 @@ def get_performance_metrics():
     except Exception as e:
         logger.error(f"Error calculating performance metrics: {e}")
         return jsonify({"error": str(e)}), 500
-
+@app.route('/api/signals_history')
+def get_signals_history():
+    if not check_db_connection(): return jsonify({"error": "Database connection failed"}), 500
+    page = request.args.get('page', 1, type=int)
+    per_page = 20
+    offset = (page - 1) * per_page
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM signals WHERE status = 'closed' ORDER BY closed_at DESC LIMIT %s OFFSET %s", (per_page, offset))
+        signals = cur.fetchall()
+        cur.execute("SELECT COUNT(*) FROM signals WHERE status = 'closed'")
+        total = cur.fetchone()['count']
+    return jsonify({"signals": [dict(s) for s in signals], "pagination": {"page": page, "per_page": per_page, "total": total, "pages": (total + per_page - 1) // per_page}})
+@sock.route('/ws')
+def ws(ws_client):
+    logger.info("WebSocket client connected.")
+    with ws_clients_lock: ws_clients.append(ws_client)
+    try:
+        ws_client.send(json.dumps({"type": "connection_established"}, cls=NpEncoder))
+        while True:
+            message = ws_client.receive(timeout=30)
+            if message is None: ws_client.send(json.dumps({"type": "ping"}, cls=NpEncoder))
+    except Exception: logger.info("WebSocket client disconnected.")
+    finally:
+        with ws_clients_lock:
+            if ws_client in ws_clients: ws_clients.remove(ws_client)
 @app.route('/api/advanced_performance_data')
 def advanced_performance_data():
     if not check_db_connection() or not conn: return jsonify({"error": "DB connection failed"}), 500
@@ -2457,99 +2388,6 @@ def update_signal_quality():
         logger.error(f"Error updating signal quality settings: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-@sock.route('/ws')
-def ws(ws_client):
-    logger.info("WebSocket client connected.")
-    with ws_clients_lock: ws_clients.append(ws_client)
-    try:
-        ws_client.send(json.dumps({"type": "connection_established"}, cls=NpEncoder))
-        while True:
-            message = ws_client.receive(timeout=30)
-            if message is None: ws_client.send(json.dumps({"type": "ping"}, cls=NpEncoder))
-    except Exception: logger.info("WebSocket client disconnected.")
-    finally:
-        with ws_clients_lock:
-            if ws_client in ws_clients: ws_clients.remove(ws_client)
-
-# --- إدارة الصفقات وإغلاقها ---
-def update_signal_in_db(signal_id, updates):
-    if not (check_db_connection() and conn): return False
-    try:
-        with conn.cursor() as cur:
-            set_clause = sql.SQL(', ').join(sql.SQL("{} = %s").format(sql.Identifier(k)) for k in updates.keys())
-            values = list(updates.values())
-            query = sql.SQL("UPDATE signals SET {} WHERE id = %s").format(set_clause)
-            values.append(signal_id)
-            cur.execute(query, values)
-        conn.commit()
-        with signal_cache_lock:
-            symbol = next((s['symbol'] for s in open_signals_cache.values() if s['id'] == signal_id), None)
-            if symbol and symbol in open_signals_cache:
-                open_signals_cache[symbol].update(updates)
-                if 'signal_details' in updates and isinstance(updates['signal_details'], str):
-                    open_signals_cache[symbol]['signal_details'] = json.loads(updates['signal_details'])
-                broadcast({"type": "signal_update", "payload": open_signals_cache[symbol]})
-        return True
-    except Exception as e:
-        logger.error(f"❌ [DB] Failed to update signal {signal_id}: {e}")
-        if conn: conn.rollback()
-        return False
-
-def close_signal(signal: Dict, closing_price: float, reason: str):
-    global usdt_balance
-    symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
-    
-    with signal_cache_lock:
-        if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal_id:
-            logger.warning(f"[Close Signal] Attempted to close already closed or non-existent signal {signal_id} for {symbol}.")
-            return
-
-    if signal.get('is_real_trade'):
-        try:
-            quantity_in_bot = Decimal(str(signal.get('quantity', 0)))
-            if quantity_in_bot > 0:
-                asset = symbol.replace("USDT", "")
-                asset_balance_info = client.get_asset_balance(asset=asset)
-                available_on_exchange = Decimal(asset_balance_info.get('free', '0.0'))
-                logger.info(f"💰 [Real Close] For {symbol}: Bot wants to sell {quantity_in_bot}, Available on Binance: {available_on_exchange}")
-                
-                quantity_to_sell = available_on_exchange
-                
-                if quantity_to_sell > 0:
-                    adjusted_quantity_to_sell = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
-                    
-                    if adjusted_quantity_to_sell and adjusted_quantity_to_sell > 0:
-                        formatted_sell_quantity = get_formatted_quantity(symbol, adjusted_quantity_to_sell)
-                        logger.info(f"💰 [Real Close] Executing MARKET SELL for {formatted_sell_quantity} of {symbol} due to {reason}")
-                        client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=formatted_sell_quantity)
-                    else:
-                        logger.warning(f"⚠️ [Real Close] Adjusted sell quantity for {symbol} is zero or None. Skipping API sell call.")
-                else:
-                    logger.warning(f"⚠️ [Real Close] No available quantity of {asset} to sell for {symbol}. Closing in DB only.")
-        except BinanceAPIException as e:
-            logger.error(f"❌ [Real Close] Binance API Error for {symbol}: {e}")
-            send_enhanced_telegram_message(f"❌ *خطأ في تنفيذ إغلاق لـ {symbol}*\n`{e}`", force=True)
-        except Exception as e:
-            logger.error(f"❌ [Real Close] CRITICAL ERROR for {symbol}: {e}", exc_info=True)
-
-    profit = ((closing_price - entry_price) / entry_price) * 100
-    
-    with consecutive_losses_lock:
-        if profit < 0: consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
-        else: consecutive_losses_by_symbol[symbol] = 0
-    update_signal_in_db(signal_id, {"status": "closed", "closing_price": closing_price, "closed_at": datetime.now(timezone.utc), "profit_percentage": profit, "closing_reason": reason})
-    with signal_cache_lock:
-        if symbol in open_signals_cache: del open_signals_cache[symbol]
-    broadcast({"type": "trade_closed", "payload": {"signal_id": signal_id, "symbol": symbol, "reason": reason}})
-    trade_type = "حقيقية" if signal.get('is_real_trade') else "ورقية"
-    result_emoji = "✅" if profit >= 0 else "🔻"
-    reason_map = {"SL_HIT": "ضرب وقف الخسارة", "TP1_HIT": "تحقيق الهدف الأول", "TP2_HIT": "تحقيق الهدف الثاني", "manual_close": "إغلاق يدوي", "TRAILING_SL_HIT": "ضرب الوقف المتحرك"}
-    reason_ar = reason_map.get(reason, reason)
-    log_and_notify("info", f"Closed {trade_type} trade for {symbol}. Profit: {profit:.2f}%", "TRADE_CLOSED")
-    settings = get_notification_settings()
-    if (profit >= settings['min_profit_notification'] or profit <= settings['max_loss_notification'] or reason == "manual_close"):
-        send_enhanced_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
-
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
     with signal_cache_lock:
         signal_to_close = next((dict(s) for s in open_signals_cache.values() if s['id'] == signal_id), None)
@@ -2591,7 +2429,6 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
     except Exception as e:
         logger.error(f"❌ [Manual Close] حدث خطأ أثناء التحقق من قاعدة البيانات للصفقة {signal_id}: {e}", exc_info=True)
         return False
-
 @app.route('/api/close_trade/<int:signal_id>', methods=['POST'])
 def api_close_trade(signal_id):
     data = request.get_json(silent=True) or {}
@@ -2600,6 +2437,25 @@ def api_close_trade(signal_id):
     thread.start()
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
 
+
+@app.route('/api/run_backtest', methods=['POST'])
+def api_run_backtest():
+    try:
+        data = request.json
+        strategy = data.get('strategy')
+        symbol = data.get('symbol', '').upper()
+        days = int(data.get('days', 90))
+
+        if not all([strategy, symbol, days]):
+            return jsonify({"error": "Missing parameters."}), 400
+
+        results = backtest_strategy(strategy, symbol, days)
+        return jsonify(results)
+    except Exception as e:
+        logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
+        return jsonify({"error": "An internal error occurred."}), 500
+
+# (The rest of the main script, including backtesting, loops, and startup logic, remains the same)
 def backtest_strategy(strategy_name, symbol, days=90):
     logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days on {SIGNAL_GENERATION_TIMEFRAME}.")
     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
@@ -2616,8 +2472,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
     backtest_trade_amount = 10.0
 
     strategy_functions = {
-        'RSI_Enhanced_Strategy': check_rsi_enhanced_strategy,
-        'Breakout_Strategy': check_breakout_strategy
+        'RSI_Enhanced_Strategy': check_rsi_enhanced_strategy # [التحديث] تم تغيير اسم الدالة والمفتاح
     }
     check_strategy = strategy_functions.get(strategy_name)
     if not check_strategy:
@@ -2656,10 +2511,8 @@ def backtest_strategy(strategy_name, symbol, days=90):
 
         if not active_trade:
             df_slice = df.iloc[:i]
-            result = check_strategy(df_slice, dummy_mtf)
-            if result:
-                confirmations = result.get('confirmations', {})
-                quality_score = result.get('quality_score', 0)
+            df_slice.name = symbol
+            if check_strategy(df_slice, dummy_mtf):
                 entry_price = current_candle['open']
                 sl = calculate_dynamic_stop_loss(df_slice, entry_price, strategy_name)
                 tp1, tp2 = calculate_dynamic_take_profit(df_slice, entry_price, sl, strategy_name)
@@ -2674,9 +2527,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
                     'stop_loss': sl,
                     'target_price_1': tp1,
                     'target_price_2': tp2,
-                    'quantity': quantity,
-                    'quality_score': quality_score,
-                    'confirmations': confirmations
+                    'quantity': quantity
                 }
 
     if not results:
@@ -2697,28 +2548,10 @@ def backtest_strategy(strategy_name, symbol, days=90):
         'win_rate': win_rate, 'avg_profit': avg_profit, 'profit_factor': profit_factor,
         'results': results, 'equity_curve': equity_curve
     }
-
-@app.route('/api/run_backtest', methods=['POST'])
-def api_run_backtest():
-    try:
-        data = request.json
-        strategy = data.get('strategy')
-        symbol = data.get('symbol', '').upper()
-        days = int(data.get('days', 90))
-
-        if not all([strategy, symbol, days]):
-            return jsonify({"error": "Missing parameters."}), 400
-
-        results = backtest_strategy(strategy, symbol, days)
-        return jsonify(results)
-    except Exception as e:
-        logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
-        return jsonify({"error": "An internal error occurred."}), 500
-
-# --- الحلقات الرئيسية والتحديثات ---
+    
 def get_mtf_trend(symbol: str) -> Dict[str, str]:
     trends = {}
-    timeframes = {'5m': 7, '15m': 10}
+    timeframes = {'5m': 7, '15m': 10} # Adjusted for 5m strategy
 
     for tf, days in timeframes.items():
         try:
@@ -2742,13 +2575,14 @@ def get_mtf_trend(symbol: str) -> Dict[str, str]:
             trends[tf] = 'unknown'
             
     return trends
-
+    
 def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop (5-minute cycle)...")
     while True:
         try:
             while True:
                 now = datetime.now(timezone.utc)
+                # Adjusted for 5-minute candles
                 seconds_until_next_candle = (5 - (now.minute % 5)) * 60 - now.second
                 
                 is_enabled_now = False
@@ -2768,9 +2602,6 @@ def main_bot_loop():
             
             logger.info("="*20 + " Starting New 5-Min Scan Cycle " + "="*20)
             for symbol in validated_symbols_to_scan:
-                # تأخير عشوائي لتجنب حظر API
-                time.sleep(random.uniform(0.2, 0.5))
-                
                 with signal_cache_lock:
                     if len(open_signals_cache) >= MAX_OPEN_TRADES:
                         logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing scan.")
@@ -2788,19 +2619,100 @@ def main_bot_loop():
                 df_featured = calculate_all_features(df)
                 df_featured.name = symbol
                 
-                # اختيار الاستراتيجية المناسبة
-                result = None
-                if check_rsi_enhanced_strategy(df_featured, mtf_trend):
-                    result = "RSI_Enhanced_Strategy"
-                elif check_breakout_strategy(df_featured, mtf_trend):
-                    result = "Breakout_Strategy"
-                
-                if result:
-                    create_trade_signal(symbol, df_featured, result)
+                # --- [التعديل الرئيسي] ---
+                # تم استبدال جميع عمليات التحقق من الاستراتيجيات المتعددة
+                strategy_found = None
+                if check_rsi_enhanced_strategy(df_featured, mtf_trend): # [التحديث] تم تغيير اسم الدالة والمفتاح
+                    strategy_found = "RSI_Enhanced_Strategy" # [التحديث] تم تغيير المفتاح
+                # --- نهاية التعديل ---
+
+                if strategy_found:
+                    create_trade_signal(symbol, df_featured, strategy_found)
 
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
+
+def update_signal_in_db(signal_id, updates):
+    if not (check_db_connection() and conn): return False
+    try:
+        with conn.cursor() as cur:
+            set_clause = sql.SQL(', ').join(sql.SQL("{} = %s").format(sql.Identifier(k)) for k in updates.keys())
+            values = list(updates.values())
+            query = sql.SQL("UPDATE signals SET {} WHERE id = %s").format(set_clause)
+            values.append(signal_id)
+            cur.execute(query, values)
+        conn.commit()
+        with signal_cache_lock:
+            symbol = next((s['symbol'] for s in open_signals_cache.values() if s['id'] == signal_id), None)
+            if symbol and symbol in open_signals_cache:
+                open_signals_cache[symbol].update(updates)
+                if 'signal_details' in updates and isinstance(updates['signal_details'], str):
+                    open_signals_cache[symbol]['signal_details'] = json.loads(updates['signal_details'])
+                broadcast({"type": "signal_update", "payload": open_signals_cache[symbol]})
+        return True
+    except Exception as e:
+        logger.error(f"❌ [DB] Failed to update signal {signal_id}: {e}")
+        if conn: conn.rollback()
+        return False
+
+def close_signal(signal: Dict, closing_price: float, reason: str):
+    global usdt_balance
+    symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
+    
+    with signal_cache_lock:
+        if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal_id:
+            logger.warning(f"[Close Signal] Attempted to close already closed or non-existent signal {signal_id} for {symbol}.")
+            return
+
+    if signal.get('is_real_trade'):
+        try:
+            quantity_in_bot = Decimal(str(signal.get('quantity', 0)))
+            if quantity_in_bot > 0:
+                asset = symbol.replace("USDT", "")
+                asset_balance_info = client.get_asset_balance(asset=asset)
+                available_on_exchange = Decimal(asset_balance_info.get('free', '0.0'))
+                logger.info(f"💰 [Real Close] For {symbol}: Bot wants to sell {quantity_in_bot}, Available on Binance: {available_on_exchange}")
+                
+                # نستخدم الكمية المتاحة فعلياً في المنصة لضمان بيع كل شيء
+                quantity_to_sell = available_on_exchange
+                
+                if quantity_to_sell > 0:
+                    adjusted_quantity_to_sell = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
+                    
+                    if adjusted_quantity_to_sell and adjusted_quantity_to_sell > 0:
+                        formatted_sell_quantity = get_formatted_quantity(symbol, adjusted_quantity_to_sell)
+                        logger.info(f"💰 [Real Close] Executing MARKET SELL for {formatted_sell_quantity} of {symbol} due to {reason}")
+                        client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=formatted_sell_quantity)
+                    else:
+                        logger.warning(f"⚠️ [Real Close] Adjusted sell quantity for {symbol} is zero or None. Skipping API sell call.")
+                else:
+                    logger.warning(f"⚠️ [Real Close] No available quantity of {asset} to sell for {symbol}. Closing in DB only.")
+        except BinanceAPIException as e:
+            logger.error(f"❌ [Real Close] Binance API Error for {symbol}: {e}")
+            send_enhanced_telegram_message(f"❌ *خطأ في تنفيذ إغلاق لـ {symbol}*\n`{e}`", force=True)
+        except Exception as e:
+            logger.error(f"❌ [Real Close] CRITICAL ERROR for {symbol}: {e}", exc_info=True)
+
+    profit = ((closing_price - entry_price) / entry_price) * 100
+    
+    # لا يوجد أي تعديل على الرصيد للصفقات الورقية
+    
+    with consecutive_losses_lock:
+        if profit < 0: consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
+        else: consecutive_losses_by_symbol[symbol] = 0
+    update_signal_in_db(signal_id, {"status": "closed", "closing_price": closing_price, "closed_at": datetime.now(timezone.utc), "profit_percentage": profit, "closing_reason": reason})
+    with signal_cache_lock:
+        if symbol in open_signals_cache: del open_signals_cache[symbol]
+    broadcast({"type": "trade_closed", "payload": {"signal_id": signal_id, "symbol": symbol, "reason": reason}})
+    trade_type = "حقيقية" if signal.get('is_real_trade') else "ورقية"
+    result_emoji = "✅" if profit >= 0 else "🔻"
+    reason_map = {"SL_HIT": "ضرب وقف الخسارة", "TP1_HIT": "تحقيق الهدف الأول", "TP2_HIT": "تحقيق الهدف الثاني", "manual_close": "إغلاق يدوي", "TRAILING_SL_HIT": "ضرب الوقف المتحرك"}
+    reason_ar = reason_map.get(reason, reason)
+    log_and_notify("info", f"Closed {trade_type} trade for {symbol}. Profit: {profit:.2f}%", "TRADE_CLOSED")
+    settings = get_notification_settings()
+    if (profit >= settings['min_profit_notification'] or profit <= settings['max_loss_notification'] or reason == "manual_close"):
+        send_enhanced_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
 
 def trade_management_loop():
     logger.info("🚀 [Trade Manager] Starting advanced trade management loop...")
@@ -2859,6 +2771,7 @@ def trade_management_loop():
                     new_sl = max(stop_loss, current_price * (1 - (TRAILING_STOP_ACTIVATION_PROFIT_PERCENT / 200)))
                     if new_sl > stop_loss:
                         update_signal_in_db(signal['id'], {"stop_loss": new_sl})
+                        # send_enhanced_telegram_message(f"🔧 *تحديث الوقف المتحرك* لـ `{symbol}` → `{new_sl:.6f}`")
             time.sleep(1)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] Loop error: {e}", exc_info=True)
@@ -2906,7 +2819,7 @@ def start_market_state_updater():
     logger.info("[Market State] Started market state updater thread")
 
 def update_balance():
-    # تحديث الرصيد الحقيقي فقط
+    # هذه الدالة الآن تحدث الرصيد الحقيقي دائمًا
     try:
         balance_info = client.get_asset_balance(asset='USDT')
         with balance_lock:
@@ -2920,7 +2833,7 @@ def update_balance_loop():
     while True:
         try: update_balance()
         except Exception as e: logger.error(f"❌ [Balance Loop] Error: {e}", exc_info=True)
-        time.sleep(60 * 5)
+        time.sleep(60 * 5) # تحديث الرصيد كل 5 دقائق
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
@@ -2937,11 +2850,12 @@ if __name__ == '__main__':
     if not validated_symbols_to_scan:
         logger.critical("❌ No valid symbols to scan. Exiting."); exit(1)
     
+    # Load initial data
     load_open_signals_to_cache()
     load_notifications_to_cache()
     load_settings_from_redis()
     logger.info("Fetching initial real account balance...")
-    update_balance()
+    update_balance() # جلب الرصيد الحقيقي عند بدء التشغيل
     with balance_lock:
         logger.info(f"Initial real balance fetched: ${usdt_balance:.2f}")
 
