@@ -1848,6 +1848,43 @@ def get_open_signals():
         logger.info(f"[API] Fetching open signals, sort by: {sort_by}")
         
         with conn.cursor() as cur:
-            # استعلام مبسط وفعال
-            query = sql.SQL("""
-                SELECT id,
+            # ✅ استعلام صحيح ومكتمل
+            cur.execute("""
+                SELECT id, symbol, entry_price, target_price_1, target_price_2, stop_loss, 
+                       strategy_name, is_real_trade, quantity, initial_quantity, 
+                       signal_details, status
+                FROM signals 
+                WHERE status IN ('open', 'updated')
+                ORDER BY %s DESC
+            """, (sort_by,))
+            
+            signals = cur.fetchall()
+        
+        # تحويل النتائج إلى قائمة من القواميس
+        signals_list = []
+        for s in signals:
+            signal_dict = dict(s)
+            # التأكد من أن signal_details هو dict
+            if isinstance(signal_dict.get('signal_details'), str):
+                try:
+                    signal_dict['signal_details'] = json.loads(signal_dict['signal_details'])
+                except:
+                    signal_dict['signal_details'] = {}
+            signals_list.append(signal_dict)
+        
+        logger.info(f"✅ [API] Returned {len(signals_list)} open signals")
+        
+        # تحديث الكاش في الخلفية
+        def update_cache():
+            with signal_cache_lock:
+                open_signals_cache.clear()
+                for signal in signals_list:
+                    open_signals_cache[signal['symbol']] = signal
+        
+        Thread(target=update_cache, daemon=True).start()
+        
+        return jsonify({"signals": signals_list})
+    
+    except Exception as e:
+        logger.error(f"❌ [API] Error fetching signals: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
