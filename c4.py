@@ -90,7 +90,7 @@ STRATEGY_NAMES = {
     "EMA_Crossover_Strategy": "تقاطع EMA21/50",
     "MACD_Momentum_Strategy": "زخم MACD الصاعد",
     "Stochastic_Strategy": "ستوكاستيك ذروة البيع",
-    "Bollinger_Bands_Strategy": ""اختراق بولينجر لأسفل",
+    "Bollinger_Bands_Strategy": "اختراق بولينجر لأسفل",
     "Multi_Indicator_Fusion": "مزيج المؤشرات الذكي"
 }
 strategy_filters_lock = Lock()
