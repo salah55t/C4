@@ -1,11 +1,3 @@
-# ملف bot_5min_v34_3_0.py - نسخة V34.3.0 (الإصدار الكامل بدون اختبار خلفي)
-# --- وصف التعديلات:
-# 1. [مرونة الفلاتر] تم تخفيف شروط فلتر هيكل السوق والسيولة لتقليل الرفض في الأسواق المتذبذبة.
-# 2. [استراتيجية جديدة] إضافة استراتيجية "الانعكاس إلى المتوسط" للعمل في الأسواق الجانبية.
-# 3. [إعادة تحليل الصفقات] تم دمج آلية جديدة تعيد تحليل كل صفقة مفتوحة كل 5 دقائق.
-# 4. [الخروج المبكر ورفع الأهداف] بناءً على إعادة التحليل، يمكن للبوت الآن الخروج مبكراً عند ظهور ضعف، أو رفع الهدف الثاني عند ظهور قوة استثنائية.
-# 5. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام.
-
 import time
 import os
 import json
@@ -45,11 +37,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v34_5min_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v35_5min_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV34.3.0_5min')
+logger = logging.getLogger('CryptoBotV35_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -78,7 +70,7 @@ is_trading_enabled: bool = False
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
 trading_mode_lock = Lock()
-usdt_balance: float = 0.0 # سيحتوي دائمًا على الرصيد الحقيقي
+usdt_balance: float = 0.0
 balance_lock = Lock()
 cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
@@ -87,9 +79,9 @@ consecutive_losses_lock = Lock()
 COOLDOWN_MINUTES_AFTER_SL = 30
 
 # --- المتغيرات القابلة للتعديل ---
-PAPER_TRADE_FIXED_AMOUNT_USDT: float = 10.0 # قيمة ثابتة للصفقات الورقية
-FIXED_TRADE_AMOUNT_MIN_USDT: float = 4.5  # للصفقات الحقيقية فقط
-FIXED_TRADE_AMOUNT_MAX_USDT: float = 6.5  # للصفقات الحقيقية فقط
+PAPER_TRADE_FIXED_AMOUNT_USDT: float = 10.0
+FIXED_TRADE_AMOUNT_MIN_USDT: float = 4.5
+FIXED_TRADE_AMOUNT_MAX_USDT: float = 6.5
 trade_amount_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.0
@@ -102,7 +94,7 @@ strategy_filters_lock = Lock()
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 HIGHER_TIMEFRAME: str = '15m'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['5m', '15m', '1h']
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7 # تقليل مدة البيانات التاريخية لتسريع الحسابات
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
 BTC_SYMBOL: str = 'BTCUSDT'
 API_REQUEST_DELAY: float = 1
 
@@ -126,7 +118,6 @@ market_state_lock = Lock()
 
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
-    # General Filters
     "Market Volatility Filter Failed": "فلتر تقلب السوق رفض الدخول",
     "Insufficient Historical Data": "بيانات تاريخية غير كافية للفحص",
     "MinNotional Filter Failed": "قيمة الصفقة أقل من الحد الأدنى للمنصة",
@@ -178,7 +169,6 @@ def get_dashboard_payload() -> Dict:
     with trade_amount_lock:
         trade_amount_min = FIXED_TRADE_AMOUNT_MIN_USDT
         trade_amount_max = FIXED_TRADE_AMOUNT_MAX_USDT
-
 
     return {
         "trading_enabled": trading_enabled,
@@ -637,7 +627,6 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
     """
     يحسب نقاط جودة للإشارة (من 0 إلى 100) بناءً على عدة عوامل فنية.
-    هذا يسمح للبوت بالتركيز فقط على أفضل الفرص.
     """
     score = 0
     last = df.iloc[-1]
@@ -645,26 +634,26 @@ def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
     # 1. قوة الاتجاه (Trend Strength) - (Max 25 points)
     ema_spread = (last['ema21'] - last['ema50']) / last['close'] * 100
     if ema_spread > 0.5:
-        score += 25  # اتجاه قوي جداً
+        score += 25
     elif ema_spread > 0.2:
-        score += 15  # اتجاه جيد
+        score += 15
     
     # 2. تأكيد الحجم (Volume Confirmation) - (Max 20 points)
     volume_ma20 = df['volume'].rolling(20).mean().iloc[-1]
     if last['volume'] > volume_ma20 * 2:
-        score += 20  # حجم استثنائي
+        score += 20
     elif last['volume'] > volume_ma20 * 1.5:
-        score += 10  # حجم جيد
+        score += 10
         
     # 3. زخم المؤشرات (Indicator Momentum) - (Max 25 points)
     # RSI
     if 60 < last['rsi'] < 70:
-        score += 15  # زخم RSI مثالي
+        score += 15
     elif last['rsi'] > 55:
         score += 5
     # MACD
     if last['macd_hist'] > 0 and df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2]:
-        score += 10 # زخم MACD إيجابي ومتزايد
+        score += 10
         
     # 4. التوافق الزمني (Multi-Timeframe Alignment) - (Max 20 points)
     if mtf_trend.get('15m') == 'bullish':
@@ -675,7 +664,7 @@ def calculate_signal_quality_score(df: pd.DataFrame, mtf_trend: Dict) -> int:
     # 5. التقلب (Volatility) - (Max 10 points)
     atr_percent = last.get('atr_percent', 0)
     if 1.0 < atr_percent < 2.5:
-        score += 10  # تقلب مثالي للتداول
+        score += 10
     elif 0.7 < atr_percent < 3.5:
         score += 5
 
@@ -770,7 +759,7 @@ def add_news_filter() -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
     now = datetime.now(timezone.utc)
     for hour, minute in news_hours:
-        if now.hour == hour and abs(now.minute - minute) <= 15: # Reduced window for 5m
+        if now.hour == hour and abs(now.minute - minute) <= 15:
             return False
     return True
 
@@ -798,7 +787,6 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
-    # --- تخفيض الحد الأدنى قليلاً للسماح بالفرص في الأسواق الأقل تقلباً ---
     ATR_PERCENT_MIN = 0.30
     ATR_PERCENT_MAX = 3.2
     
@@ -810,10 +798,9 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     return True
-    
-# ===== NEW: ENHANCED TRADING STRATEGIES V34.3.0 =====
 
-# ===== استراتيجيات محسّنة =====
+# ===== NEW: ENHANCED TRADING STRATEGIES V35.0 =====
+# ===== استراتيجيات محسّنة ومجددة =====
 
 def check_smart_momentum_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     """
@@ -1045,16 +1032,102 @@ def check_mean_reversion_bb_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
 
     return True
 
-# ===== ADVANCED SMART MARKET STRUCTURE FILTER V2 =====
+def check_early_trend_rider_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية جديدة: ركوب الاتجاه المبكر
+    تدخل في بداية الاتجاهات قبل أن تكون واضحة للجميع
+    """
+    if len(df) < 100: return False
+    last, prev = df.iloc[-1], df.iloc[-2]
+    
+    # 1. ADX يبدأ في الارتفاع من مستويات منخفضة (إشارة بداية اتجاه)
+    adx_rising = (last['adx'] > 15 and last['adx'] > df['adx'].iloc[-5:].mean() * 1.1)
+    if not adx_rising: return False
+    
+    # 2. تقاطع EMA سريع (9 فوق 21)
+    ema_cross = (prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21'])
+    if not ema_cross: return False
+    
+    # 3. MACD يعبر خط الصفر
+    macd_cross = (df['macd'].iloc[-2] <= 0 and last['macd'] > 0)
+    if not macd_cross: return False
+    
+    # 4. RSI في منطقة زخم مبكر (45-60)
+    if not (45 < last['rsi'] < 60): return False
+    
+    # 5. حجم يتزايد بشكل ملحوظ
+    volume_ma = df['volume'].rolling(20).mean().iloc[-1]
+    if not last['volume'] > volume_ma * 1.5: return False
+    
+    # 6. لا يوجد مقاومة قريبة جداً
+    recent_highs = df['high'].tail(15).max()
+    if (recent_highs - last['close']) / last['close'] < 0.01: return False
+    
+    return True
+
+def check_mean_reversion_aggressive_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية جديدة: انعكاس إلى المتوسط عدواني
+    للأسواق الجانبية مع تقلبات عالية، دخول أسرع
+    """
+    if len(df) < 50: return False
+    last = df.iloc[-1]
+    
+    # 1. السوق جانبي (ADX منخفض جداً)
+    if not last.get('adx', 99) < 20: return False
+    
+    # 2. السعر بعيد جداً عن المتوسط (فرصة عالية للارتداد)
+    bb_position = (last['close'] - last['bb_lower']) / (last['bb_upper'] - last['bb_lower'])
+    if bb_position > 0.15: return False
+    
+    # 3. RSI في منطقة متطرفة
+    rsi_extreme = last.get('rsi', 50) < 30
+    if not rsi_extreme: return False
+    
+    # 4. حجم تداول منخفض (نهاية الضغط)
+    volume_ma = df['volume'].rolling(20).mean().iloc[-1]
+    if not last['volume'] < volume_ma * 0.7: return False
+    
+    # 5. شمعة صغيرة نسبياً (تردد قبل الارتداد)
+    candle_body = abs(last['close'] - last['open'])
+    avg_candle_body = df['close'].tail(20).diff().abs().mean()
+    if not candle_body < avg_candle_body: return False
+    
+    return True
+
+def check_volume_spike_continuation_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية جديدة: استمرارية اختراق الحجم
+    تدخل بعد اختراق مؤكد بزيادة حجم كبيرة
+    """
+    if len(df) < 50: return False
+    last = df.iloc[-1]
+    
+    # 1. اكتشاف spike حجم في آخر 3 شموع
+    volume_ma = df['volume'].rolling(20).mean()
+    recent_volumes = df['volume'].tail(3)
+    spike_detected = any(recent_volumes > volume_ma.tail(3) * 2.5)
+    if not spike_detected: return False
+    
+    # 2. السعر أعلى من المتوسط المتحرك 50
+    if not last['close'] > last['ema50']: return False
+    
+    # 3. MACD إيجابي
+    if not last['macd_hist'] > 0: return False
+    
+    # 4. RSI في منطقة صاعدة
+    if not last['rsi'] > 50: return False
+    
+    # 5. لا يوجد مقاومة مباشرة
+    if not (last['bb_upper'] - last['close']) / last['close'] > 0.008: return False
+    
+    return True
+
+# ===== ADVANCED SMART MARKET STRUCTURE FILTER V2 (MORE FLEXIBLE) =====
 
 def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
     """
-    تحليل متقدم لهيكل السوق يشمل:
-    - اكتشاف القمم والقيعان الرئيسية (Swing High/Low)
-    - تحديد اتجاه الهيكل (Bullish/Bearish/Ranging)
-    - قياس قوة الهيكل
-    - اكتشاف كسر الهيكل (Break of Structure - BOS)
-    - اكتشاف تغيير الهيكل (Change of Character - CHoCH)
+    تحليل متقدم لهيكل السوق مع تخفيف الشروط لزيادة الإشارات
     """
     
     if len(df) < 50:
@@ -1064,9 +1137,9 @@ def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
     highs = df['high'].values
     lows = df['low'].values
     
-    # استخدام order=5 للحصول على نقاط تحول معنوية
-    swing_high_indices = argrelextrema(highs, np.greater, order=5)[0]
-    swing_low_indices = argrelextrema(lows, np.less, order=5)[0]
+    # استخدام order=3 للحصول على نقاط تحول أكثر
+    swing_high_indices = argrelextrema(highs, np.greater, order=3)[0]
+    swing_low_indices = argrelextrema(lows, np.less, order=3)[0]
     
     # 2. تحليل اتجاه القمم والقيعان
     structure_data = {
@@ -1083,11 +1156,11 @@ def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
         recent_highs = highs[swing_high_indices[-3:]]
         recent_lows = lows[swing_low_indices[-3:]]
         
-        # هيكل صاعد: قمم وقيعان أعلى (Higher Highs & Higher Lows)
+        # هيكل صاعد: قمم وقيعان أعلى
         highs_rising = all(recent_highs[i] < recent_highs[i+1] for i in range(len(recent_highs)-1))
         lows_rising = all(recent_lows[i] < recent_lows[i+1] for i in range(len(recent_lows)-1))
         
-        # هيكل هابط: قمم وقيعان أدنى (Lower Highs & Lower Lows)
+        # هيكل هابط: قمم وقيعان أدنى
         highs_falling = all(recent_highs[i] > recent_highs[i+1] for i in range(len(recent_highs)-1))
         lows_falling = all(recent_lows[i] > recent_lows[i+1] for i in range(len(recent_lows)-1))
         
@@ -1118,7 +1191,7 @@ def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
             structure_data["bos_detected"] = True
             structure_data["bos_direction"] = "bullish"
         
-        # CHoCH: السعر كسر آخر قاع في اتجاه هابط (تغيير اتجاه)
+        # CHoCH: السعر كسر آخر قاع في اتجاه صاعد
         if structure_data["structure_type"] in ["bullish", "weak_bullish"]:
             if current_price < last_swing_low * 0.998:
                 structure_data["choch_detected"] = True
@@ -1129,11 +1202,7 @@ def detect_market_structure(df: pd.DataFrame) -> Dict[str, any]:
 
 def apply_advanced_market_structure_filter(df: pd.DataFrame, symbol: str) -> Tuple[bool, Optional[str]]:
     """
-    فلتر هيكل السوق الذكي المتطور - يجمع بين عدة تقنيات:
-    1. تحليل القمم والقيعان (Swing Analysis)
-    2. اكتشاف كسر الهيكل (BOS)
-    3. اكتشاف مناطق السيولة (Liquidity Zones)
-    4. تحليل قوة الاتجاه (Trend Strength)
+    فلتر هيكل السوق الذكي المتطور - تخفيف الشروط
     """
     
     if len(df) < 50:
@@ -1142,12 +1211,12 @@ def apply_advanced_market_structure_filter(df: pd.DataFrame, symbol: str) -> Tup
     # 1. تحليل الهيكل الأساسي
     structure = detect_market_structure(df)
     
-    # 2. السماح فقط للهياكل القوية
-    if structure["strength"] < 55:
+    # 2. السماح للهياكل الضعيفة أيضاً (تخفيف من 55 إلى 40)
+    if structure["strength"] < 40:
         return False, f"Weak structure (strength: {structure['strength']})"
     
-    # 3. الرفض في حالة تغيير الهيكل السلبي (CHoCH هابط)
-    if structure.get("choch_detected") and structure.get("choch_direction") == "bearish":
+    # 3. الرفض فقط في حالة تغيير الهيكل السلبي القوي
+    if structure.get("choch_detected") and structure.get("choch_direction") == "bearish" and structure["strength"] < 30:
         return False, "Bearish CHoCH detected - potential trend reversal"
     
     # 4. تحليل مناطق السيولة
@@ -1159,7 +1228,6 @@ def apply_advanced_market_structure_filter(df: pd.DataFrame, symbol: str) -> Tup
     last = df.iloc[-1]
     
     # تأكيد قوة الاتجاه بواسطة EMAs
-    # Make sure required EMAs are calculated if not present
     if not all(k in df.columns for k in ['ema9', 'ema21', 'ema50']):
         df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
@@ -1173,7 +1241,7 @@ def apply_advanced_market_structure_filter(df: pd.DataFrame, symbol: str) -> Tup
     if not ema_alignment:
         return False, "EMAs not properly aligned"
     
-    # 6. التحقق من عدم وجود divergence سلبي
+    # 6. التحقق من عدم وجود divergence سلبي قوي
     if detect_bearish_divergence(df):
         return False, "Bearish divergence detected"
     
@@ -1246,7 +1314,6 @@ def detect_bearish_divergence(df: pd.DataFrame) -> bool:
     if len(df) < 20:
         return False
     
-    # Make sure RSI is calculated if not present
     if 'rsi' not in df.columns:
         delta = df['close'].diff()
         gain = delta.where(delta > 0, 0)
@@ -1279,21 +1346,20 @@ def detect_bearish_divergence(df: pd.DataFrame) -> bool:
     
     return False
 
-# ===== SMART DYNAMIC FILTERS (IMPROVED) =====
+# ===== SMART DYNAMIC FILTERS (MORE PERMISSIVE) =====
 
 def apply_smart_liquidity_filter(df: pd.DataFrame, symbol: str) -> bool:
     """
-    فلتر السيولة الذكي - يتحقق من جودة السيولة مع استثناء للزيادات الإيجابية في الحجم
+    فلتر السيولة الذكي - تخفيف الشروط لقبول المزيد من الفرص
     """
     if len(df) < 20: return False
     
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-
+    
     # 1. نسبة Spread (High - Low) إلى السعر
     spread_ratio = (last['high'] - last['low']) / last['close']
-    if spread_ratio > 0.05:
-        log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Spread > 5% ({spread_ratio:.2f}%)"})
+    if spread_ratio > 0.08:  # تخفيف من 0.05 إلى 0.08
+        log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Spread > 8% ({spread_ratio:.2f}%)"})
         return False
     
     # 2. حجم التداول مستقر (لا تذبذب عنيف)
@@ -1301,11 +1367,10 @@ def apply_smart_liquidity_filter(df: pd.DataFrame, symbol: str) -> bool:
     volume_mean = df['volume'].tail(20).mean()
     cv = volume_std / volume_mean if volume_mean > 0 else 999
     
-    if cv > 2.0:
-        # استثناء: إذا كان تذبذب الحجم مرتفعاً ولكنه مصحوب بحركة سعرية إيجابية، فقد يكون اختراقاً
-        is_bullish_volume_spike = (last['close'] > prev['close']) and (last['volume'] > volume_mean * 1.5)
+    if cv > 3.0:  # تخفيف من 2.0 إلى 3.0
+        is_bullish_volume_spike = (last['close'] > df.iloc[-2]['close']) and (last['volume'] > volume_mean * 1.5)
         if not is_bullish_volume_spike:
-            log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Volume CV > 2.0 ({cv:.2f})"})
+            log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Volume CV > 3.0 ({cv:.2f})"})
             return False
         else:
             logger.info(f"[{symbol}] Liquidity filter bypassed due to bullish volume spike.")
@@ -1313,8 +1378,8 @@ def apply_smart_liquidity_filter(df: pd.DataFrame, symbol: str) -> bool:
     # 3. السعر لا يتحرك بقفزات كبيرة
     price_changes = df['close'].pct_change().tail(10).abs()
     max_price_jump = price_changes.max()
-    if max_price_jump > 0.05:
-        log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Price Jump > 5% ({max_price_jump:.2f}%)"})
+    if max_price_jump > 0.08:  # تخفيف من 0.05 إلى 0.08
+        log_rejection(symbol, "Smart Liquidity Filter Failed", {"reason": f"Price Jump > 8% ({max_price_jump:.2f}%)"})
         return False
     
     return True
@@ -1331,8 +1396,9 @@ def apply_smart_risk_reward_filter(entry_price: float, stop_loss: float, target1
     rr1 = reward1 / risk
     rr2 = reward2 / risk
     
-    if rr1 < 1.5 or rr2 < 2.5: return False
-    if (risk / entry_price) > 0.03: return False
+    # تخفيف من (1.5, 2.5) إلى (1.2, 2.0)
+    if rr1 < 1.2 or rr2 < 2.0: return False
+    if (risk / entry_price) > 0.035: return False  # تخفيف من 0.03 إلى 0.035
     
     return True
 
@@ -1351,7 +1417,6 @@ def calculate_market_regime(df: pd.DataFrame) -> str:
     elif adx < 20 and bb_width < bb_width_ma * 0.8: return 'ranging'
     elif atr_percent > 3.0: return 'volatile'
     else: return 'mixed'
-
 
 # ===== STRATEGY SELECTOR =====
 
@@ -1385,6 +1450,21 @@ ENHANCED_STRATEGIES = {
         "name": "انعكاس للمتوسط",
         "check_function": check_mean_reversion_bb_strategy,
         "enabled": True, "best_regime": ['ranging', 'mixed'], "risk_level": 'low'
+    },
+    "Early_Trend_Rider_Strategy": {
+        "name": "ركوب الاتجاه المبكر",
+        "check_function": check_early_trend_rider_strategy,
+        "enabled": True, "best_regime": ['mixed', 'trending'], "risk_level": 'high'
+    },
+    "Mean_Reversion_Aggressive_Strategy": {
+        "name": "انعكاس عدواني",
+        "check_function": check_mean_reversion_aggressive_strategy,
+        "enabled": True, "best_regime": ['ranging'], "risk_level": 'high'
+    },
+    "Volume_Spike_Continuation_Strategy": {
+        "name": "استمرارية spike الحجم",
+        "check_function": check_volume_spike_continuation_strategy,
+        "enabled": True, "best_regime": ['trending', 'mixed'], "risk_level": 'medium'
     }
 }
 
@@ -1397,21 +1477,20 @@ def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str) -> Option
     """
     market_regime = calculate_market_regime(df)
     
-    # Use the new advanced market structure filter V2 which also includes liquidity checks
+    # استخدام الفلتر المتقدم مع تخفيف الشروط
     passed, reason = apply_advanced_market_structure_filter(df, symbol)
     if not passed:
         log_rejection(symbol, "Advanced Market Structure Filter Failed", {"reason": reason})
         return None
 
-    # The original liquidity filter is now redundant as it's part of the advanced filter
-    # if not apply_smart_liquidity_filter(df, symbol): return None
-    
     with strategy_filters_lock:
         strategies_to_check = {k: v for k, v in ENHANCED_STRATEGIES.items()}
 
+    # محاولة كل الاستراتيجيات الممكنة حتى نجد مناسبة
     for strategy_key, strategy_info in strategies_to_check.items():
         if not strategy_info['enabled']: continue
-        if market_regime not in strategy_info['best_regime'] and market_regime != 'mixed': continue
+        # السماح باستراتيجيات أخرى حتى لو لم تكن في النظام المثالي
+        # if market_regime not in strategy_info['best_regime'] and market_regime != 'mixed': continue
         
         try:
             if strategy_info['check_function'](df, mtf_trend):
@@ -1423,7 +1502,7 @@ def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str) -> Option
     return None
 
 
-# ===== IMPROVED STOP LOSS & TAKE PROFIT =====
+# ===== IMPROVED STOP LOSS & TAKE PROFIT (MORE ADAPTIVE) =====
 
 def calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     """
@@ -1432,10 +1511,14 @@ def calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, strategy_nam
     last = df.iloc[-1]
     atr_value = last.get('atr', 0)
     
-    if strategy_name == "Mean_Reversion_BB_Strategy":
-        atr_multiplier = 1.5
-    else:
-        atr_multiplier = 2.0 if strategy_name in ['Smart_Momentum_Strategy', 'Golden_Cross_Strategy'] else 1.8
+    # تعديل multipliers بناءً على الاستراتيجية
+    multipliers = {
+        'Mean_Reversion_BB_Strategy': 1.5,
+        'Mean_Reversion_Aggressive_Strategy': 1.3,
+        'Early_Trend_Rider_Strategy': 2.5,
+        'Volume_Spike_Continuation_Strategy': 2.2
+    }
+    atr_multiplier = multipliers.get(strategy_name, 2.0)
 
     atr_stop = entry_price - (atr_value * atr_multiplier)
     recent_low = df['low'].tail(7).min()
@@ -1444,11 +1527,13 @@ def calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, strategy_nam
     
     stop_loss = max(atr_stop, structure_stop, ema21_stop)
     
-    max_stop_distance = entry_price * 0.025
+    # تخفيف الحد الأقصى للوقف
+    max_stop_distance = entry_price * 0.028
     if entry_price - stop_loss > max_stop_distance:
         stop_loss = entry_price - max_stop_distance
     
-    min_stop_distance = entry_price * 0.008
+    # تخفيف الحد الأدنى للوقف
+    min_stop_distance = entry_price * 0.006
     if entry_price - stop_loss < min_stop_distance:
         stop_loss = entry_price - min_stop_distance
     
@@ -1467,13 +1552,17 @@ def calculate_smart_take_profit(
     risk_amount = entry_price - stop_loss
     if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.025)
     
+    # نسب RR محسّنة بناءً على الاستراتيجية
     rr_ratios = {
         'Smart_Momentum_Strategy': (2.0, 3.5),
         'Advanced_Pullback_Strategy': (1.8, 3.2),
         'Breakout_Retest_Strategy': (2.2, 4.0),
         'Volume_Divergence_Strategy': (1.6, 2.8),
         'Golden_Cross_Strategy': (2.0, 3.5),
-        'Mean_Reversion_BB_Strategy': (1.5, 2.8)
+        'Mean_Reversion_BB_Strategy': (1.5, 2.5),
+        'Early_Trend_Rider_Strategy': (2.5, 4.5),
+        'Mean_Reversion_Aggressive_Strategy': (1.3, 2.2),
+        'Volume_Spike_Continuation_Strategy': (2.0, 3.8)
     }
     
     rr1, rr2 = rr_ratios.get(strategy_name, (1.8, 3.0))
@@ -1484,10 +1573,11 @@ def calculate_smart_take_profit(
     last = df.iloc[-1]
     atr_value = last.get('atr', 0)
     
-    max_target1 = entry_price + (atr_value * 3.5)
+    # تعديل الحدود القصوى
+    max_target1 = entry_price + (atr_value * 4.0)
     if target1 > max_target1: target1 = max_target1
     
-    max_target2 = entry_price + (atr_value * 6.0)
+    max_target2 = entry_price + (atr_value * 7.0)
     if target2 > max_target2: target2 = max_target2
     
     return (target1, target2)
@@ -1527,7 +1617,6 @@ def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
 def adjust_quantity_to_lot_size(symbol: str, quantity: float, logger=logger) -> Optional[Decimal]:
     """
     ضبط الكمية حسب LOT_SIZE مع معالجة أفضل للأخطاء.
-    تم إصلاح المشكلة عن طريق الوصول مباشرة إلى المتغير العام exchange_info_map.
     """
     from decimal import Decimal, ROUND_DOWN
     
@@ -1581,7 +1670,6 @@ def calculate_position_size_fixed(symbol: str, entry_price: float,
                                   override_amount: Optional[float] = None) -> Optional[Decimal]:
     """
     حساب حجم الصفقة مع معالجة صحيحة لجميع الحالات (النسخة الأساسية الآمنة).
-    تم إصلاح المشكلة عن طريق الوصول مباشرة إلى المتغير العام exchange_info_map.
     """
     if override_amount is not None:
         desired_usdt_amount = override_amount
@@ -1673,21 +1761,22 @@ def calculate_dynamic_position_size(
     if not is_real:
         base_usdt_amount = PAPER_TRADE_FIXED_AMOUNT_USDT
     else:
+        # تقليل النطاق للحد من المخاطر
         base_usdt_amount = random.uniform(FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT)
 
     # 2. تعديل المبلغ بناءً على جودة الإشارة
     quality_modifier = 1.0
     if quality_score > 85:
-        quality_modifier = 1.25  # زيادة 25% للفرص الممتازة
+        quality_modifier = 1.15  # تقليل من 1.25 إلى 1.15
     elif quality_score < 70:
-        quality_modifier = 0.85   # تقليل 15% للفرص الأضعف
+        quality_modifier = 0.90   # زيادة من 0.85 إلى 0.90
 
     # 3. تعديل المبلغ بناءً على تقلب السوق (مخاطرة عكسية)
     volatility_modifier = 1.0
     if atr_percent > 3.0:
-        volatility_modifier = 0.80  # تقليل 20% في الأسواق شديدة التقلب
+        volatility_modifier = 0.75  # تقليل من 0.80 إلى 0.75
     elif atr_percent < 0.8:
-        volatility_modifier = 1.15  # زيادة 15% في الأسواق الهادئة
+        volatility_modifier = 1.10  # تقليل من 1.15 إلى 1.10
 
     # 4. حساب المبلغ النهائي المطلوب
     desired_usdt_amount = base_usdt_amount * quality_modifier * volatility_modifier
@@ -1738,7 +1827,8 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_key: str, mtf_tr
     atr_percent = df.iloc[-1].get('atr_percent', 0)
     signal_details = {
         "atr": df.iloc[-1].get('atr', 0), "trailing_stop_activated": False, "tp1_done": False,
-        "quality_score": quality_score, "atr_percent": atr_percent
+        "quality_score": quality_score, "atr_percent": atr_percent,
+        "early_exit_threshold": entry_price * 0.995  # خروج مبكر عند -0.5%
     }
     
     trade_levels = {
@@ -1770,10 +1860,10 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_key: str, mtf_tr
                 type=Client.ORDER_TYPE_MARKET, 
                 quantity=formatted_quantity
             )
-            avg_fill_price = sum(Decimal(f['price']) * Decimal(f['qty']) for f in order.get('fills', [])) / max(sum(Decimal(f['qty']) for f in order.get('fills', [])), Decimal('1e-8')) if order.get('fills') else Decimal(str(entry_price))
+            avg_fill_price = sum
+                                    (Decimal(f['price']) * Decimal(f['qty']) for f in order.get('fills', [])) / max(sum(Decimal(f['qty']) for f in order.get('fills', [])), Decimal('1e-8')) if order.get('fills') else Decimal(str(entry_price))
             final_quantity = Decimal(order.get('executedQty', str(quantity_dec)))
-            order_id =
-                        order_id = order.get('orderId', 'N/A')
+            order_id = order.get('orderId', 'N/A')
             save_signal_to_db(
                 symbol, float(avg_fill_price), trade_levels,
                 strategy_key, True, float(final_quantity),
@@ -1821,15 +1911,14 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
     except Exception as e:
         logger.error(f"❌ [DB] CRITICAL ERROR saving signal for {symbol}: {e}", exc_info=True)
 
-
-# --- HTML Templates ---
+# ===== HTML Templates (UNCHANGED) =====
 DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V34.3.0)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V35.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1896,7 +1985,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V34.3.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V35.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2287,7 +2376,7 @@ function createPerformanceChart(chartData) {
     performanceChartInstance = new Chart(ctx, {
         type: 'line',
         data: { labels: chartData.labels, datasets: [{ label: 'رأس المال', data: chartData.values, borderColor: '#3aa0ff', backgroundColor: 'rgba(58, 160, 255, 0.1)', tension: 0.4, fill: true, pointRadius: 0, borderWidth: 2 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { type: 'time', time: { unit: 'day' }, ticks: { color: 'var(--muted)', autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } }, y: { ticks: { color: 'var(--muted)', callback: (v) => v.toFixed(0) }, grid: { color: 'rgba(255, 255, 255, 0.05)' } } } }
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { type: 'time', time: { unit: 'day' }, ticks: { color: 'var(--muted)', autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } }, y: { ticks: { color: 'var(--muted)', callback: (v) => v.toFixed(0) }, grid: { color: 'rgba(255, 255, 255, 0.05)' } } }
     });
 }
 
@@ -2303,7 +2392,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V34.3.0)</title>
+<title>الإعدادات - بوت 5 دقائق (V35.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2509,7 +2598,7 @@ def reanalyze_open_trade(signal: Dict, df: pd.DataFrame) -> Tuple[Optional[Dict]
     symbol = signal['symbol']
     last = df.iloc[-1]
     
-    # 1. فحص علامات الضعف للخروج المبكر
+    # 1. فحص علامات الضعف للخروج المبكر (تخفيف الشروط)
     is_weak = False
     weakness_reason = ""
     if (last['close'] < last['ema21']) and (df.iloc[-2]['close'] > df.iloc[-2]['ema21']):
@@ -2520,10 +2609,10 @@ def reanalyze_open_trade(signal: Dict, df: pd.DataFrame) -> Tuple[Optional[Dict]
         weakness_reason = "MACD histogram negative for 2 bars"
 
     if is_weak:
-        logger.warning(f"🚨 [{symbol}] Weakness detected in open trade: {weakness_reason}. Triggering early exit.")
+        logger.warning(f"🚨 [{symbol}] Weakness detected: {weakness_reason}. Triggering early exit.")
         return None, "early_exit_weakness"
 
-    # 2. فحص القوة الاستثنائية لرفع الهدف الثاني (فقط بعد تحقيق الهدف الأول)
+    # 2. فحص القوة الاستثنائية لرفع الهدف الثاني
     details = signal.get('signal_details', {})
     if isinstance(details, str): details = json.loads(details)
     if details.get('tp1_done'):
@@ -2537,7 +2626,7 @@ def reanalyze_open_trade(signal: Dict, df: pd.DataFrame) -> Tuple[Optional[Dict]
 
     return None, None
 
-# --- مسارات Flask ---
+# --- Flask API Routes ---
 @app.route('/')
 def dashboard(): return render_template_string(DASHBOARD_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
 
@@ -3098,7 +3187,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.3.0 (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V35.0 (5-Min Scalper) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
