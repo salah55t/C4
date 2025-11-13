@@ -1391,9 +1391,7 @@ def find_best_strategy(df: pd.DataFrame, mtf_trend: Dict, symbol: str) -> Option
             continue
     
     return None
-
-
-# ===== IMPROVED STOP LOSS & TAKE PROFIT (Relaxed) =====
+    # ===== IMPROVED STOP LOSS & TAKE PROFIT (Relaxed) =====
 
 def calculate_smart_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     """
@@ -2001,7 +1999,9 @@ function showLoadingIndicator(containerId) {
     if(container) container.innerHTML = '<div class="loading-spinner"></div>';
 }
 function showNotification(message, type = 'info') {
+    // --- FIX: إزالة alert() واستخدام console.log بدلاً من ذلك ---
     console.log(`[${type.toUpperCase()}] ${message}`);
+    // يمكنك إضافة نظام إشعارات أفضل هنا لاحقاً
 }
 
 function closeTrade(signalId) {
@@ -2009,6 +2009,7 @@ function closeTrade(signalId) {
     // This is a simple placeholder. For a real app, you'd create a DOM element.
     // For this environment, we'll proceed assuming user confirmation
     // as confirm() is blocked.
+    // تم إزالة النافذة المنبثقة `confirm()`
     console.warn("Triggering manual close for signal " + signalId + ". (Skipping confirm() dialog).");
     
     fetch(`/api/close_trade/${signalId}`, {
@@ -2195,6 +2196,7 @@ async function initializeDashboard() {
         // ===== START OF FIX =====
         // --- FIX: Use Promise.allSettled to prevent one failed request from breaking the entire dashboard ---
         // This was the cause of the bug in the screenshot
+        // هذا هو الإصلاح الرئيسي للمشكلة التي ظهرت في لقطة الشاشة
         const results = await Promise.allSettled([
             fetch('/api/dashboard_data'),
             fetch('/api/open_signals'),
@@ -2226,6 +2228,7 @@ async function initializeDashboard() {
         } else {
             console.error("Failed to load base dashboard data:", baseDataRes.reason || (baseDataRes.value && baseDataRes.value.statusText));
             // Show a partial error, but don't stop
+            showNotification('فشل تحميل البيانات الأساسية للوحة التحكم', 'error');
         }
 
         // 2. Process Open Signals
@@ -2265,7 +2268,6 @@ async function initializeDashboard() {
         qs('#signals').innerHTML = '<p>فشل تحميل البيانات. حاول تحديث الصفحة.</p>';
     }
 }
-
 async function loadAdditionalData() {
     try {
         const perfRes = await fetch('/api/advanced_performance_data');
@@ -2323,6 +2325,7 @@ qs('#tradingModeToggle').addEventListener('change', function() {
   const isPaper = !this.checked, modeText = isPaper ? 'ورقي' : 'حقيقي';
   // --- FIX: Do not use confirm() ---
   if (!isPaper) {
+      // تم إزالة النافذة المنبثقة `confirm()`
       console.warn("Switching to REAL trading. (Skipping confirm() dialog).");
   }
   fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({paper_trading_mode: isPaper}) })
