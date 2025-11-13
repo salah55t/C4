@@ -66,7 +66,7 @@ except Exception as e:
     exit(1)
 
 # --- متغيرات عامة وإعدادات البوت ---
-is_trading_enabled: bool = False
+is_trading_enabled: bool = True
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
 trading_mode_lock = Lock()
@@ -3281,4 +3281,5 @@ if __name__ == '__main__':
     # --- FIX: Use 'waitress' for production, but 'app.run' is fine for this context ---
     # from waitress import serve
     # serve(app, host='0.0.0.0', port=5000)
+
     app.run(host='0.0.0.0', port=5000, debug=False)
