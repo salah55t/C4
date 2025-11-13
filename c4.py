@@ -3280,6 +3280,7 @@ if __name__ == '__main__':
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     # --- FIX: Use 'waitress' for production, but 'app.run' is fine for this context ---
     # from waitress import serve
-    # serve(app, host='0.0.0.0', port=5000)
+    serve(app, host='0.0.0.0', port=5000)
 
     app.run(host='0.0.0.0', port=5000, debug=False)
+
