@@ -67,7 +67,7 @@ except Exception as e:
     exit(1)
 
 # --- متغيرات عامة وإعدادات البوت ---
-is_trading_enabled: bool = True
+is_trading_enabled: bool = False
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
 trading_mode_lock = Lock()
@@ -1807,8 +1807,7 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         broadcast({"type": "new_signal", "payload": signal_data})
     except Exception as e:
         logger.error(f"❌ [DB] CRITICAL ERROR saving signal for {symbol}: {e}", exc_info=True)
-
-# ===== HTML Templates (Updated) =====
+        # ===== HTML Templates (Updated) =====
 DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
@@ -3281,5 +3280,4 @@ if __name__ == '__main__':
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     # --- FIX: Use 'waitress' for production as requested by error log ---
     # app.run(host='0.0.0.0', port=5000, debug=False)
-
     serve(app, host='0.0.0.0', port=5000)
