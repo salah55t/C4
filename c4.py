@@ -18,6 +18,7 @@ from binance.exceptions import BinanceAPIException
 from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 from flask_sock import Sock
+from waitress import serve  # =====> تم إضافة هذا السطر لحل الخطأ
 from threading import Thread, Lock
 from datetime import datetime, timezone, timedelta
 from decouple import config
@@ -66,7 +67,7 @@ except Exception as e:
     exit(1)
 
 # --- متغيرات عامة وإعدادات البوت ---
-is_trading_enabled: bool = True
+is_trading_enabled: bool = False
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
 trading_mode_lock = Lock()
@@ -623,7 +624,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Stochastic ---
     low_14 = df_calc['low'].rolling(14).min()
     high_14 = df_calc['high'].rolling(14).max()
-    high_low_range = high_14 - low_14
+    high_low_range = high_14 - high_14
     meaningful_range = high_low_range > (df_calc['close'] * 0.0001)
     df_calc['stoch_k'] = np.where(
         meaningful_range,
@@ -3278,9 +3279,6 @@ if __name__ == '__main__':
     
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
-    # --- FIX: Use 'waitress' for production, but 'app.run' is fine for this context ---
-    # from waitress import serve
+    # --- FIX: Use 'waitress' for production as requested by error log ---
+    # app.run(host='0.0.0.0', port=5000, debug=False)
     serve(app, host='0.0.0.0', port=5000)
-
-    app.run(host='0.0.0.0', port=5000, debug=False)
-
