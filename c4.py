@@ -67,7 +67,7 @@ except Exception as e:
     exit(1)
 
 # --- متغيرات عامة وإعدادات البوت ---
-is_trading_enabled: bool = False
+is_trading_enabled: bool = True
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
 trading_mode_lock = Lock()
@@ -3280,4 +3280,5 @@ if __name__ == '__main__':
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     # --- FIX: Use 'waitress' for production as requested by error log ---
     # app.run(host='0.0.0.0', port=5000, debug=False)
+
     serve(app, host='0.0.0.0', port=5000)
