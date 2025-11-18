@@ -334,192 +334,222 @@ def calculate_entry_params(df, strategy_name):
     return stop_loss, target1, target2
 
 # --- نهاية الجزء الثاني ---
-# smart_bot_part3.py
-# --- الجزء الثالث: إعادة التحليل، حلقة التداول، والواجهة ---
+# smart_bot_part3_v2.py
+# --- الجزء الثالث (المعدل): التنفيذ، تلغرام، وإعادة التحليل ---
+# استبدل الجزء الثالث القديم بهذا الملف بالكامل
 
-# --- 🚀 الجديد: آلية إعادة تحليل الإشارات المفتوحة (The Brain) ---
+# --- إعدادات تلغرام ---
+TELEGRAM_TOKEN = config('TELEGRAM_BOT_TOKEN', default='')
+TELEGRAM_CHAT_ID = config('TELEGRAM_CHAT_ID', default='')
+
+def send_telegram_alert(message):
+    """إرسال تنبيهات إلى تلغرام مع معالجة الأخطاء"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        # محاولة الإرسال في خيط منفصل لتجنب تعطيل البوت
+        Thread(target=requests.post, args=(url,), kwargs={'data': payload}).start()
+    except Exception as e:
+        logger.error(f"فشل إرسال تلغرام: {e}")
+
+# --- دالة التنفيذ الذكية (ورقي / حقيقي) ---
+def execute_order(client, symbol, side, quantity, price=None, order_type='MARKET'):
+    """
+    تنفذ الطلب بناءً على وضع التداول (ورقي أو حقيقي)
+    """
+    global usdt_balance, paper_trading_mode
+    
+    # 1. التنفيذ الورقي (Paper)
+    if paper_trading_mode:
+        logger.info(f"📝 تنفيذ ورقي: {side} {symbol} الكمية: {quantity}")
+        return {"status": "FILLED", "executedQty": quantity, "price": price if price else live_prices.get(symbol, 0), "orderId": "PAPER_123"}
+    
+    # 2. التنفيذ الحقيقي (Real)
+    else:
+        try:
+            logger.info(f"🚨 تنفيذ حقيقي: {side} {symbol}...")
+            # تحويل الكمية للصيغة المقبولة (Precision)
+            # (هنا يجب إضافة كود لضبط الكمية حسب stepSize الخاص بباينانس لتجنب الأخطاء)
+            
+            if order_type == 'MARKET':
+                order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=quantity)
+            else:
+                order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=quantity, price=str(price))
+            
+            return order
+        except BinanceAPIException as e:
+            logger.error(f"❌ خطأ في باينانس: {e}")
+            send_telegram_alert(f"❌ فشل تنفيذ صفقة حقيقية لـ {symbol}: {e}")
+            return None
+
+# --- آلية إعادة تحليل الإشارات المفتوحة (The Brain) ---
 def reanalyze_open_position(symbol, signal_data, df, market_regime):
-    """
-    تقوم هذه الدالة بفحص الصفقة المفتوحة واتخاذ قرار:
-    - HOLD: استمرار
-    - EXIT_NOW: خروج فوري (تغير السوق، أو فشل النمط)
-    - TIGHTEN_SL: رفع وقف الخسارة لحجز الربح
-    - EXTEND_TP: رفع الهدف (إذا كان الزخم قوي جداً)
-    """
     last = df.iloc[-1]
     entry_price = float(signal_data['entry_price'])
     current_price = float(last['close'])
     profit_pct = (current_price - entry_price) / entry_price * 100
-    duration = (datetime.now() - datetime.fromisoformat(signal_data['closed_at'] if 'closed_at' in signal_data else signal_data['created_at'] if 'created_at' in signal_data else datetime.now().isoformat())).total_seconds() / 60
     
     action = "HOLD"
     reason = ""
 
-    # 1. الحماية ضد انقلاب السوق
+    # 1. الحماية: السوق انقلب ضدنا
     if market_regime == "bearish" and signal_data['strategy_name'] in ["Momentum_Bullish", "Pullback_Bullish"]:
-        # السوق انقلب للهبوط ونحن في صفقة شراء
-        if profit_pct < -0.5:
-            return "EXIT_NOW", "Market regime flipped to bearish"
-        elif profit_pct > 0.5:
-            return "TIGHTEN_SL", "Protect profit as market turned bearish"
+        if profit_pct < -0.5: return "EXIT_NOW", "انقلاب السوق للهبوط"
+        elif profit_pct > 0.5: return "TIGHTEN_SL", "حماية الربح (سوق هابط)"
 
-    # 2. الخروج الزمني (Time-based Exit)
-    # إذا مرت 12 شمعة (ساعة) والسعر لم يتحرك كثيراً
-    if duration > 60 and -0.5 < profit_pct < 0.5:
-         return "EXIT_NOW", "Stagnation (Price not moving)"
-
-    # 3. التحليل الفني العكسي (Technical Breakdown)
+    # 2. ضعف الزخم الفني
     if signal_data['strategy_name'] == "Momentum_Bullish":
-        # إذا فقدنا الزخم (RSI كسر 50 لأسفل أو MACD سلبي)
-        if last['rsi'] < 48 or last['macd_hist'] < 0:
-            if profit_pct > 0: return "TIGHTEN_SL", "Momentum lost"
-            else: return "EXIT_NOW", "Momentum breakdown"
+        if last['rsi'] < 48:
+            return ("TIGHTEN_SL", "ضعف الزخم (RSI)") if profit_pct > 0 else ("EXIT_NOW", "فشل الزخم")
     
-    # 4. تعزيز الربح (Trend Following)
-    if profit_pct > 2.0 and last['rsi'] > 70 and last['macd_hist'] > 0:
-        # الزخم قوي جداً، يمكننا رفع الهدف
-        return "EXTEND_TP", "Strong momentum detected"
+    # 3. تعزيز الربح
+    if profit_pct > 2.5 and last['macd_hist'] > 0:
+        return "EXTEND_TP", "زخم قوي جداً 🚀"
 
     return action, reason
 
-# --- حلقة إدارة الصفقات (محدثة) ---
+# --- حلقة إدارة الصفقات ---
 def trade_management_loop(client):
-    logger.info("🛡️ بدء حلقة إدارة الصفقات وإعادة التحليل...")
+    logger.info("🛡️ بدء حلقة إدارة الصفقات...")
     while True:
         try:
-            # تحديث قائمة الصفقات المفتوحة
-            with locks['signals']:
-                signals = list(open_signals_cache.values())
-            
-            if not signals:
-                time.sleep(5)
-                continue
+            with locks['signals']: signals = list(open_signals_cache.values())
+            if not signals: time.sleep(5); continue
 
             for signal in signals:
                 symbol = signal['symbol']
-                # جلب بيانات حديثة للتحليل
-                df = fetch_historical_data(client, symbol, '5m', 2) # فريم 5 دقائق
+                df = fetch_historical_data(client, symbol, '5m', 1)
                 if df is None: continue
                 df = calculate_features(df)
-                
                 current_price = df.iloc[-1]['close']
                 
-                # 1. فحص الأهداف والوقف الكلاسيكي
+                # تحديث السعر المباشر للكاش
+                with locks['prices']: live_prices[symbol] = current_price
+
                 sl = float(signal['stop_loss'])
                 tp1 = float(signal['target_price_1'])
                 tp2 = float(signal['target_price_2'])
                 
-                if current_price <= sl:
-                    close_trade(client, signal, current_price, "Stop Loss Hit")
-                    continue
-                elif current_price >= tp2:
-                    close_trade(client, signal, current_price, "TP2 Hit")
-                    continue
+                # 1. التحقق من الأهداف والوقف
+                exit_reason = None
+                if current_price <= sl: exit_reason = "ضرب وقف الخسارة 🛑"
+                elif current_price >= tp2: exit_reason = "تحقيق الهدف النهائي 🎯"
                 
-                # 2. 🚀 إعادة التحليل الذكي
+                if exit_reason:
+                    close_trade(client, signal, current_price, exit_reason)
+                    continue
+
+                # 2. إعادة التحليل الذكي
                 with locks['market']: regime = current_market_regime
-                
                 action, reason = reanalyze_open_position(symbol, signal, df, regime)
                 
                 if action == "EXIT_NOW":
-                    logger.info(f"⚠️ خروج مبكر ذكي لـ {symbol}: {reason}")
-                    close_trade(client, signal, current_price, f"Smart Exit: {reason}")
+                    close_trade(client, signal, current_price, f"خروج ذكي: {reason}")
                 
                 elif action == "TIGHTEN_SL":
-                    new_sl = current_price * 0.995 # وضع الوقف تحت السعر الحالي بقليل
+                    new_sl = current_price * 0.998 # حجز ربح
                     if new_sl > sl:
                         update_signal_sl(signal['id'], new_sl)
-                        logger.info(f"🔧 تم رفع وقف الخسارة لـ {symbol} إلى {new_sl} ({reason})")
+                        msg = f"🛡️ *تحديث {symbol}*\nتم رفع الوقف إلى: `{new_sl:.4f}`\nالسبب: {reason}"
+                        logger.info(msg)
+                        send_telegram_alert(msg)
 
-                elif action == "EXTEND_TP":
-                    new_tp2 = tp2 * 1.02 # زيادة الهدف 2%
-                    update_signal_tp(signal['id'], tp2=new_tp2)
-                    logger.info(f"🚀 تم رفع الهدف لـ {symbol} بسبب قوة الزخم")
-
-            time.sleep(10) # فحص كل 10 ثواني
+            time.sleep(5)
         except Exception as e:
-            logger.error(f"خطأ في إدارة الصفقات: {e}")
-            time.sleep(10)
+            logger.error(f"Error in trade loop: {e}"); time.sleep(10)
 
-# --- دوال مساعدة للتنفيذ ---
 def close_trade(client, signal, price, reason):
-    # تنفيذ البيع في باينانس وتحديث قاعدة البيانات (تبسيط للكود)
-    logger.info(f"💰 إغلاق الصفقة {signal['symbol']} عند {price}. السبب: {reason}")
-    # ... (كود البيع الفعلي هنا - مشابه للسابق)
-    # حذف من الكاش
-    with locks['signals']:
-        if signal['symbol'] in open_signals_cache:
-            del open_signals_cache[signal['symbol']]
+    qty = float(signal['quantity'])
+    # تنفيذ أمر البيع
+    order = execute_order(client, signal['symbol'], Client.SIDE_SELL, qty)
+    
+    if order:
+        profit_pct = (price - float(signal['entry_price'])) / float(signal['entry_price']) * 100
+        # تحديث قاعدة البيانات وحذف من الكاش
+        with locks['signals']:
+            if signal['symbol'] in open_signals_cache: del open_signals_cache[signal['symbol']]
+        
+        # إرسال تنبيه تلغرام
+        emoji = "✅" if profit_pct > 0 else "🔻"
+        msg = (f"{emoji} *إغلاق صفقة {signal['symbol']}*\n"
+               f"الربح: `{profit_pct:.2f}%`\n"
+               f"السعر: `{price}`\n"
+               f"السبب: {reason}")
+        send_telegram_alert(msg)
+        logger.info(f"Closed {signal['symbol']}: {profit_pct:.2f}%")
 
 def update_signal_sl(id, new_sl):
-    # تحديث ال SQL والكاش
     with locks['signals']:
-        for sym, sig in open_signals_cache.items():
-            if sig['id'] == id:
-                sig['stop_loss'] = new_sl
-                break
-
-def update_signal_tp(id, tp2):
-    with locks['signals']:
-        for sym, sig in open_signals_cache.items():
-            if sig['id'] == id:
-                sig['target_price_2'] = tp2
-                break
+        for s in open_signals_cache.values():
+            if s['id'] == id: s['stop_loss'] = new_sl
 
 # --- الحلقة الرئيسية (Main Loop) ---
 def main_bot_loop():
-    logger.info("🚀 بدء البوت الذكي...")
-    
-    # تهيئة الاتصال
+    logger.info("🚀 بدء البوت الرئيسي...")
     client = Client(API_KEY, API_SECRET)
-    
-    # تشغيل خيوط الخلفية
     Thread(target=trade_management_loop, args=(client,), daemon=True).start()
     
     while True:
         try:
-            if not is_trading_enabled:
-                time.sleep(10)
-                continue
+            if not is_trading_enabled: time.sleep(10); continue
             
-            # 1. تحديث هيكل السوق (كل 15 دقيقة مثلاً أو كل دورة كبيرة)
             analyze_market_structure(client)
             
-            # 2. جلب العملات للمسح
+            # جلب رموز نشطة
             tickers = client.get_ticker()
-            # فلترة بسيطة لأعلى حجم تداول
-            symbols = [t['symbol'] for t in tickers if t['symbol'].endswith('USDT') and float(t['quoteVolume']) > 10000000]
-            
-            for symbol in symbols[:30]: # فحص أفضل 30 عملة فقط للسرعة
+            symbols = [t['symbol'] for t in tickers if t['symbol'].endswith('USDT') and float(t['quoteVolume']) > 20000000]
+            random.shuffle(symbols) # تنويع البحث
+
+            for symbol in symbols[:20]:
                 with locks['signals']:
-                    if symbol in open_signals_cache: continue # لدينا صفقة بالفعل
+                    if symbol in open_signals_cache: continue
                 
-                # جلب البيانات
                 df = fetch_historical_data(client, symbol, '5m', 2)
                 if df is None: continue
                 df = calculate_features(df)
                 
-                # تحديد الاستراتيجية المناسبة للوضع الحالي
                 with locks['market']: regime = current_market_regime
-                
                 strategy = get_signal_from_strategies(symbol, df, regime)
                 
                 if strategy:
-                    logger.info(f"✨ إشارة جديدة ({strategy}) للعملة {symbol} في وضع {regime}")
+                    current_price = df.iloc[-1]['close']
                     sl, tp1, tp2 = calculate_entry_params(df, strategy)
                     
-                    # تنفيذ الدخول (محاكاة أو حقيقي)
-                    # save_signal_to_db(...)
-                    # add_to_cache(...)
-            
-            time.sleep(300) # دورة كل 5 دقائق
+                    # تحديد الكمية (مثلاً 15 دولار)
+                    quantity = 15.0 / current_price 
+                    # (ملاحظة: في التطبيق الحقيقي يجب ضبط الدقة stepSize)
+                    
+                    # تنفيذ الشراء
+                    order = execute_order(client, symbol, Client.SIDE_BUY, quantity)
+                    
+                    if order:
+                        # حفظ الصفقة
+                        signal_data = {
+                            'id': int(time.time()), 'symbol': symbol, 'entry_price': current_price,
+                            'stop_loss': sl, 'target_price_1': tp1, 'target_price_2': tp2,
+                            'quantity': quantity, 'strategy_name': strategy, 'status': 'open'
+                        }
+                        with locks['signals']: open_signals_cache[symbol] = signal_data
+                        
+                        # إرسال تنبيه تلغرام
+                        msg = (f"🚀 *توصية جديدة ({strategy})*\n"
+                               f"العملة: `{symbol}`\n"
+                               f"الدخول: `{current_price}`\n"
+                               f"الهدف: `{tp2}` | الوقف: `{sl}`\n"
+                               f"حالة السوق: {regime}")
+                        send_telegram_alert(msg)
+
+            time.sleep(120) # انتظار دقيقتين بين دورات المسح
             
         except Exception as e:
-            logger.error(f"خطأ في الحلقة الرئيسية: {e}")
-            time.sleep(60)
-
-# --- تطبيق Flask (واجهة بسيطة) ---
-# smart_bot_part4.py
+            logger.error(f"Main Loop Error: {e}"); time.sleep(60)
 # --- الجزء الرابع: واجهة المستخدم المتقدمة والخادم ---
 # ملاحظة: انسخ هذا الكود وألصقه بدلاً من أسطر تشغيل Flask في نهاية الجزء الثالث.
 
