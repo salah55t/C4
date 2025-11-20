@@ -6,13 +6,12 @@ import requests
 import numpy as np
 import pandas as pd
 import psycopg2
-import redis
 import random
 from threading import Thread, Lock
 from datetime import datetime, timedelta
 from collections import deque
 from decouple import config
-from typing import List, Dict, Optional, Tuple, Union
+from typing import List, Dict, Optional
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from flask import Flask, jsonify, render_template_string, request, redirect, url_for
@@ -20,14 +19,14 @@ from flask_cors import CORS
 from psycopg2.extras import RealDictCursor
 import warnings
 
-# --- 1. إعدادات النظام والبيئة ---
+# --- 1. إعدادات النظام ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('smart_bot_v7.log', encoding='utf-8'), logging.StreamHandler()]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.FileHandler('smart_bot_v8.log', encoding='utf-8'), logging.StreamHandler()]
 )
-logger = logging.getLogger('SmartBot_Elite')
+logger = logging.getLogger('SmartBot_V8')
 
 try:
     API_KEY = config('BINANCE_API_KEY')
@@ -39,29 +38,28 @@ except Exception as e:
     logger.critical(f"❌ Config Error: {e}")
     exit(1)
 
-# --- 2. المتغيرات العالمية والحالة ---
+# --- 2. المتغيرات والإعدادات ---
 BOT_SETTINGS = {
     "is_trading_enabled": False,
     "paper_trading_mode": True,
     "trade_amount_usdt": 20.0,
-    "max_open_trades": 4,
-    "stop_loss_pct": 2.0,
-    "take_profit_pct": 4.0,
-    "trailing_start_pct": 1.5, # يبدأ تحريك الوقف بعد ربح 1.5%
+    "max_open_trades": 5,
+    "stop_loss_atr_multiplier": 2.0, # From video concept
+    "trailing_atr_multiplier": 2.3,  # Specific value from video
     "volume_filter_limit": 40
 }
 
 LEADING_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT']
 market_state = {
     "score": 50, "regime": "sideways", 
-    "details": {"1h": 50, "4h": 50, "1d": 50}, # Scores per timeframe
+    "details": {"1h": 50, "4h": 50, "1d": 50},
     "last_update": None
 }
 
 open_signals_cache = {}
 live_prices = {}
 scan_logs = deque(maxlen=50)
-performance_history = [] # For equity curve
+performance_history = []
 
 locks = {
     'signals': Lock(), 'prices': Lock(), 'market': Lock(), 
@@ -84,7 +82,7 @@ def init_db():
                     quantity DOUBLE PRECISION, strategy_name TEXT, 
                     status TEXT DEFAULT 'open', is_real_trade BOOLEAN DEFAULT FALSE, 
                     closed_at TIMESTAMP, closing_price DOUBLE PRECISION, profit_pct DOUBLE PRECISION,
-                    exit_reason TEXT, updates_log JSONB DEFAULT '[]'::jsonb, created_at TIMESTAMP DEFAULT NOW()
+                    exit_reason TEXT, atr_at_entry DOUBLE PRECISION, created_at TIMESTAMP DEFAULT NOW()
                 );
             """)
         logger.info("✅ Database Initialized.")
@@ -94,60 +92,27 @@ def check_db():
     global conn
     if conn is None or conn.closed != 0: init_db()
 
-# --- 4. نظام التنبيهات الذكي (Telegram) ---
-def send_telegram(event_type, payload):
-    """
-    event_type: BUY, SELL, UPDATE_SL, UPDATE_TP, MARKET_CHANGE, ERROR
-    """
+# --- 4. التنبيهات ---
+def send_telegram(event, payload):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-
     msg = ""
-    if event_type == "BUY":
-        mode = "📝 ورقي" if BOT_SETTINGS['paper_trading_mode'] else "💵 حقيقي"
-        msg = (
-            f"🚀 *دخول جديد ({payload['symbol']})*\n"
-            f"📊 الاستراتيجية: `{payload['strategy']}`\n"
-            f"💰 السعر: `{payload['price']}`\n"
-            f"🎯 الهدف: `{payload['tp']}` | 🛑 الوقف: `{payload['sl']}`\n"
-            f"⚙️ الوضع: {mode}"
-        )
-    
-    elif event_type == "UPDATE_SL":
-        msg = (
-            f"🛡️ *تحديث وقف الخسارة ({payload['symbol']})*\n"
-            f"تم رفع الوقف لحماية الأرباح.\n"
-            f"الوقف الجديد: `{payload['new_sl']}`\n"
-            f"السعر الحالي: `{payload['current_price']}`\n"
-            f"الربح المحقق: `{payload['profit']:.2f}%`"
-        )
-
-    elif event_type == "UPDATE_TP":
-        msg = (
-            f"🏹 *تمديد الهدف ({payload['symbol']})*\n"
-            f"الزخم قوي جداً! تم رفع الهدف لزيادة الربح.\n"
-            f"الهدف الجديد: `{payload['new_tp']}`"
-        )
-
-    elif event_type == "SELL":
+    if event == "BUY":
+        msg = (f"🚀 *New Trade ({payload['symbol']})*\n"
+               f"Strategy: `{payload['strategy']}`\n"
+               f"Price: `{payload['price']}`\n"
+               f"Mode: {'📝 Paper' if BOT_SETTINGS['paper_trading_mode'] else '💵 Real'}")
+    elif event == "SELL":
         emoji = "✅" if payload['profit'] > 0 else "🔻"
-        msg = (
-            f"{emoji} *إغلاق صفقة ({payload['symbol']})*\n"
-            f"الربح النهائي: `{payload['profit']:.2f}%`\n"
-            f"سعر الخروج: `{payload['price']}`\n"
-            f"السبب: _{payload['reason']}_"
-        )
-        
-    elif event_type == "MARKET_CHANGE":
-        icon = "🟢" if payload['new'] == 'bullish' else ("🔴" if payload['new'] == 'bearish' else "🟠")
-        msg = (f"🔔 *تغير حالة السوق*\nأصبح الوضع: `{payload['new'].upper()}` {icon}\nالنتيجة: `{payload['score']}/100`")
-
+        msg = (f"{emoji} *Closed ({payload['symbol']})*\nProfit: `{payload['profit']:.2f}%`\nReason: _{payload['reason']}_")
+    elif event == "UPDATE":
+        msg = (f"🛡️ *Trailing Stop Update ({payload['symbol']})*\nNew SL: `{payload['new_sl']}`")
+    
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
-        Thread(target=requests.post, args=(url,), kwargs={'data': payload}).start()
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                      data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
     except: pass
 
-# --- 5. التحليل الفني والاستراتيجيات ---
+# --- 5. التحليل الفني (تم إضافة AO من الفيديو) ---
 def fetch_data(client, symbol, interval, limit=100):
     try:
         klines = client.get_historical_klines(symbol, interval, limit=limit)
@@ -159,6 +124,7 @@ def fetch_data(client, symbol, interval, limit=100):
 
 def add_indicators(df):
     df = df.copy()
+    # Standard Indicators
     df['ema50'] = df['close'].ewm(span=50).mean()
     df['ema200'] = df['close'].ewm(span=200).mean()
     
@@ -169,10 +135,6 @@ def add_indicators(df):
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # MACD
-    df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
-    df['macd_hist'] = df['macd'] - df['macd'].ewm(span=9).mean()
-    
     # Bollinger
     df['bb_mid'] = df['close'].rolling(20).mean()
     std = df['close'].rolling(20).std()
@@ -180,144 +142,111 @@ def add_indicators(df):
     df['bb_lower'] = df['bb_mid'] - (2*std)
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
     
+    # ATR (Video Specific: used for exits)
+    df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
+    df['atr'] = df['tr'].rolling(14).mean()
+    df['atr35'] = df['tr'].rolling(35).mean() # For Video Strategy Trailing
+    
+    # Awesome Oscillator (Video Strategy Core)
+    median_price = (df['high'] + df['low']) / 2
+    df['ao'] = median_price.rolling(5).mean() - median_price.rolling(34).mean()
+    
     # Volume MA
     df['vol_ma'] = df['volume'].rolling(20).mean()
     
-    # ATR
-    df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
-    df['atr'] = df['tr'].rolling(14).mean()
+    # Recent High/Low (For Breakout)
+    df['recent_high'] = df['high'].rolling(20).max() # 20 candles lookback
+    
     return df.fillna(0)
 
-# --- الفلتر الذكي (Simple Trend & Volume Filter) ---
-def check_smart_filter(df, regime):
-    last = df.iloc[-1]
-    
-    # 1. Volume Check: يجب أن يكون الحجم أعلى من المتوسط أو قريب منه
-    if last['volume'] < last['vol_ma'] * 0.8:
-        return False, "Weak Volume"
-    
-    # 2. Trend Confirmation: تجنب الشراء تحت EMA200 في سوق صاعد
-    if regime == "bullish" and last['close'] < last['ema200']:
-        return False, "Price below EMA200 (Trend Mismatch)"
-        
-    # 3. RSI Safety: تجنب الشراء في مناطق التشبع الشرائي المفرط
-    if last['rsi'] > 75:
-        return False, "RSI Overbought (>75)"
-        
-    return True, "OK"
-
+# --- استراتيجيات التداول (محدثة من الفيديو) ---
 def get_strategy_signal(symbol, df, regime):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # أولاً: تطبيق الفلتر العام
-    passed, reason = check_smart_filter(df, regime)
-    if not passed: return None, reason
+    # الفلتر العام (تأكيد الحجم والاتجاه)
+    if last['volume'] < last['vol_ma'] * 0.8: return None, "Low Volume"
     
-    # الاستراتيجيات
+    # 1. AO Breakout Strategy (مستوحاة من الفيديو)
+    # الشروط: AO يعبر الصفر للأعلى + السعر يكسر قمة الـ 20 شمعة السابقة
+    if last['ao'] > 0 and prev['ao'] <= 0: # Zero Cross
+        if last['close'] > prev['recent_high']: # Breakout Confirmation
+            if regime == "bullish" or regime == "sideways":
+                return "AO_Breakout", "AO Cross + High Breakout"
+    
+    # 2. Volatility Squeeze Breakout
     if regime == "bullish":
-        # A. Volatility Breakout (انفجار سعري مع حجم)
         if prev['bb_width'] < 0.15 and last['close'] > last['bb_upper']:
-            return "Vol_Breakout", "Strong expansion"
-            
-        # B. Trend Pullback (ارتداد صحي)
-        if last['close'] > last['ema50'] and last['close'] < last['bb_mid'] and last['rsi'] < 55 and last['macd_hist'] > prev['macd_hist']:
-            return "Trend_Pullback", "Healthy correction"
+            return "Vol_Breakout", "Bollinger Squeeze Break"
 
-    elif regime == "sideways":
-        # C. Range Scalp (من القاع)
-        if last['low'] <= last['bb_lower'] and last['close'] > last['bb_lower'] and last['rsi'] < 40:
-            if last['close'] > last['open']: # Green candle
-                return "Range_Scalp", "Bounce off support"
-                
-    return None, "No signal"
+    # 3. Trend Pullback
+    if regime == "bullish":
+        if last['close'] > last['ema200'] and last['rsi'] < 55 and last['rsi'] > 40 and last['close'] > last['ema50']:
+             # Simple pullback to EMA50 area
+            return "Trend_Pullback", "EMA50 Bounce"
 
-# --- 6. تحليل هيكل السوق (MTF Radar) ---
-def analyze_market_mtf(client):
-    global market_state
-    timeframes = ['1h', '4h', '1d']
-    tf_scores = {'1h': 0, '4h': 0, '1d': 0}
-    
-    for sym in LEADING_SYMBOLS:
-        for tf in timeframes:
-            df = fetch_data(client, sym, tf, 100)
-            if df is None: continue
-            
-            # Score logic: Price > EMA200 (+50), RSI > 50 (+50)
-            close = df['close'].iloc[-1]
-            ema200 = df['close'].ewm(span=200).mean().iloc[-1]
-            rsi = 100 - (100 / (1 + (df['close'].diff().gt(0).sum()/df['close'].diff().lt(0).abs().sum()))) # Approx
-            
-            score = 0
-            if close > ema200: score += 50
-            # إعادة حساب RSI بشكل صحيح يتطلب دالة كاملة، سنستخدم تقريب
-            # هنا نفترض أن المتوسط إيجابي
-            tf_scores[tf] += score
-            
-    # Normalize scores (0-100)
-    final_scores = {k: min(100, v / len(LEADING_SYMBOLS) * 2) for k, v in tf_scores.items()}
-    
-    # Weighted Total
-    total_score = (final_scores['1h']*0.2) + (final_scores['4h']*0.3) + (final_scores['1d']*0.5)
-    
-    new_regime = "sideways"
-    if total_score >= 65: new_regime = "bullish"
-    elif total_score <= 35: new_regime = "bearish"
-    
-    with locks['market']:
-        if market_state['regime'] != new_regime:
-            send_telegram("MARKET_CHANGE", {"new": new_regime, "score": total_score})
-        market_state = {"score": total_score, "regime": new_regime, "details": final_scores, "last_update": datetime.now()}
+    return None, "No Signal"
 
-# --- 7. إعادة التحليل وإدارة الصفقات (Active Brain) ---
+def calculate_params(df, strategy):
+    last = df.iloc[-1]
+    atr = last['atr']
+    close = last['close']
+    
+    # معايير الفيديو: Stop = ATR based
+    if strategy == "AO_Breakout":
+        sl = close - (atr * 2.0)
+        tp = close + (atr * 5.0) # هدف مفتوح للترند
+    elif strategy == "Vol_Breakout":
+        sl = close - (atr * 2.0)
+        tp = close + (atr * 4.0)
+    else:
+        sl = close - (atr * 1.5)
+        tp = close + (atr * 3.0)
+        
+    return sl, tp
+
+# --- 6. المحرك الذكي (Active Brain) ---
 def reanalyze_position(symbol, signal, df, regime):
     """
-    يتم استدعاؤها كل 5 دقائق لاتخاذ قرار بشأن الصفقة المفتوحة
+    تطبيق منطق الفيديو: Trailing Stop باستخدام ATR
     """
     last = df.iloc[-1]
+    curr = float(last['close'])
     entry = float(signal['entry_price'])
-    current = float(last['close'])
     sl = float(signal['stop_loss'])
-    tp = float(signal['target_price_2'])
     
-    profit_pct = (current - entry) / entry * 100
+    profit_pct = (curr - entry) / entry * 100
     
-    action = "HOLD"
-    new_val = 0.0
-    reason = ""
+    # Video Logic: Trailing Stop = 2.3 * ATR(35)
+    # نطبقه فقط عندما تكون الصفقة رابحة لضمان حجز الربح
+    if profit_pct > 1.0:
+        atr35 = last['atr35']
+        trailing_dist = atr35 * BOT_SETTINGS['trailing_atr_multiplier']
+        
+        new_sl = curr - trailing_dist
+        
+        # تحديث الوقف فقط إذا كان أعلى من الوقف الحالي (لا ننزله أبداً)
+        if new_sl > sl:
+            return "UPDATE_SL", new_sl, "ATR Trailing Logic"
 
-    # A. حماية الأرباح (Trailing Stop)
-    trailing_trigger = BOT_SETTINGS['trailing_start_pct']
-    if profit_pct >= trailing_trigger:
-        # نقوم برفع الوقف ليكون تحت السعر الحالي بـ 1%
-        proposed_sl = current * 0.99
-        if proposed_sl > sl:
-            return "UPDATE_SL", proposed_sl, "Trailing Profit"
+    # Exit if trend reverses violently below EMA200 in bullish setup
+    if regime == "bearish" and curr < last['ema200'] and profit_pct < -1:
+        return "CLOSE_NOW", curr, "Trend Reversal (Below EMA200)"
 
-    # B. تمديد الهدف (Greedy Mode)
-    # إذا وصلنا قريب من الهدف وكان الزخم (RSI) لا يزال قوياً جداً (>70)
-    if current >= tp * 0.98 and last['rsi'] > 70 and regime == "bullish":
-        proposed_tp = tp * 1.05 # زيادة الهدف 5%
-        return "UPDATE_TP", proposed_tp, "Strong Momentum Extension"
+    return "HOLD", 0, ""
 
-    # C. الخروج الطارئ (Panic Exit)
-    # إذا انقلب السوق للهبوط، والصفقة خاسرة، ومؤشر RSI انهار تحت 40
-    if regime == "bearish" and profit_pct < -1.0 and last['rsi'] < 40:
-        return "CLOSE_NOW", current, "Market Crash Protection"
-
-    return "HOLD", 0.0, ""
-
+# --- 7. التنفيذ ---
 def execute_order(client, symbol, side, qty):
     if BOT_SETTINGS['paper_trading_mode']: return True
     try:
         client.create_order(symbol=symbol, side=side, type='MARKET', quantity=qty)
         return True
     except Exception as e:
-        logger.error(f"Execution Error: {e}")
+        logger.error(f"Exec Error: {e}")
         return False
 
 def trade_manager(client):
-    logger.info("🛡️ Elite Trade Manager Started...")
+    logger.info("🛡️ Trade Manager Running...")
     while True:
         try:
             with locks['signals']: signals = list(open_signals_cache.values())
@@ -325,69 +254,88 @@ def trade_manager(client):
             
             for sig in signals:
                 sym = sig['symbol']
-                df = fetch_data(client, sym, '5m', 50)
+                df = fetch_data(client, sym, '5m', 60)
                 if df is None: continue
                 df = add_indicators(df)
                 curr = df.iloc[-1]['close']
                 with locks['prices']: live_prices[sym] = curr
                 
-                sl = float(sig['stop_loss'])
-                tp = float(sig['target_price_2'])
+                sl, tp = float(sig['stop_loss']), float(sig['target_price_1'])
                 
-                # 1. Check Hard Exits
-                exit_reason = None
-                if curr <= sl: exit_reason = "Stop Loss 🛑"
-                elif curr >= tp: exit_reason = "Target Hit 🎯"
+                reason = None
+                if curr <= sl: reason = "Stop Loss 🛑"
+                elif curr >= tp: reason = "Take Profit 🎯"
                 
-                if exit_reason:
+                if not reason:
+                    with locks['market']: regime = market_state['regime']
+                    act, val, note = reanalyze_position(sym, sig, df, regime)
+                    
+                    if act == "UPDATE_SL":
+                        with locks['signals']: open_signals_cache[sym]['stop_loss'] = val
+                        # Update DB
+                        check_db()
+                        with conn.cursor() as cur: cur.execute("UPDATE signals SET stop_loss=%s WHERE id=%s", (val, sig['id']))
+                        send_telegram("UPDATE", {"symbol": sym, "new_sl": val})
+                    
+                    elif act == "CLOSE_NOW":
+                        execute_order(client, sym, 'SELL', sig['quantity'])
+                        close_signal_db(sym, curr, f"Smart Exit: {note}")
+                        continue
+
+                if reason:
                     execute_order(client, sym, 'SELL', sig['quantity'])
-                    close_signal_db(sym, curr, exit_reason)
-                    continue
+                    close_signal_db(sym, curr, reason)
+            
+            time.sleep(5)
+        except: time.sleep(5)
 
-                # 2. Active Re-analysis
-                with locks['market']: regime = market_state['regime']
-                action, val, note = reanalyze_position(sym, sig, df, regime)
-                
-                if action == "UPDATE_SL":
-                    with locks['signals']: open_signals_cache[sym]['stop_loss'] = val
-                    update_db_sl(sig['id'], val)
-                    profit = (curr - sig['entry_price'])/sig['entry_price']*100
-                    send_telegram("UPDATE_SL", {"symbol": sym, "new_sl": val, "current_price": curr, "profit": profit})
-                
-                elif action == "UPDATE_TP":
-                    with locks['signals']: open_signals_cache[sym]['target_price_2'] = val
-                    send_telegram("UPDATE_TP", {"symbol": sym, "new_tp": val})
-                
-                elif action == "CLOSE_NOW":
-                    execute_order(client, sym, 'SELL', sig['quantity'])
-                    close_signal_db(sym, curr, f"Smart Exit: {note}")
+# --- 8. تحليل هيكل السوق ---
+def analyze_mtf(client):
+    global market_state
+    timeframes = ['1h', '4h', '1d']
+    tf_scores = {'1h':0, '4h':0, '1d':0}
+    
+    for sym in LEADING_SYMBOLS:
+        for tf in timeframes:
+            df = fetch_data(client, sym, tf, 100)
+            if df is None: continue
+            close = df['close'].iloc[-1]
+            ema = df['close'].ewm(span=200).mean().iloc[-1]
+            if close > ema: tf_scores[tf] += 25 # Max 100 per TF
+            
+    final = {k: v for k,v in tf_scores.items()}
+    score = (final['1h']*0.2 + final['4h']*0.3 + final['1d']*0.5)
+    regime = "bullish" if score >= 60 else ("bearish" if score <= 40 else "sideways")
+    
+    with locks['market']:
+        if market_state['regime'] != regime:
+            pass # Could verify change
+        market_state = {"score": score, "regime": regime, "details": final, "last_update": datetime.now()}
 
-            time.sleep(5) # Check every 5 seconds
-        except Exception as e: logger.error(f"Manager: {e}"); time.sleep(5)
-
-# --- 8. المحرك الرئيسي ---
-def main_engine():
+# --- 9. Main Loop ---
+def main_loop():
     try: client = Client(API_KEY, API_SECRET)
-    except: logger.critical("API Error"); return
+    except: return
     
     Thread(target=trade_manager, args=(client,), daemon=True).start()
     
-    # Load symbols
     try:
         with open('crypto_list.txt') as f:
             file_symbols = [l.strip().upper().replace('\n','') for l in f if l.strip()]
             file_symbols = [s if s.endswith('USDT') else s+'USDT' for s in file_symbols]
-    except: file_symbols = ['BTCUSDT', 'ETHUSDT']
+    except: file_symbols = ['BTCUSDT']
 
     while True:
         try:
             with locks['settings']:
-                if not BOT_SETTINGS['is_trading_enabled']: time.sleep(5); continue
+                enabled = BOT_SETTINGS['is_trading_enabled']
                 limit = BOT_SETTINGS['volume_filter_limit']
                 amt = BOT_SETTINGS['trade_amount_usdt']
                 max_t = BOT_SETTINGS['max_open_trades']
-
-            analyze_market_mtf(client)
+            
+            if not enabled: time.sleep(5); continue
+            
+            analyze_mtf(client)
             
             # Volume Filter
             tickers = client.get_ticker()
@@ -409,50 +357,35 @@ def main_engine():
                 
                 if strat:
                     curr = df.iloc[-1]['close']
+                    sl, tp = calculate_params(df, strat)
+                    qty = amt / curr
                     atr = df.iloc[-1]['atr']
                     
-                    # Dynamic SL/TP
-                    sl = curr - (atr * 2)
-                    tp = curr + (atr * 4)
-                    qty = amt / curr
-                    
                     if execute_order(client, sym, 'BUY', qty):
-                        sig = {
-                            'symbol': sym, 'entry_price': curr, 'stop_loss': sl, 
-                            'target_price_1': tp, 'target_price_2': tp, 
-                            'quantity': qty, 'strategy_name': strat, 'status': 'open'
-                        }
-                        new_id = save_signal_db(sig)
-                        sig['id'] = new_id
-                        with locks['signals']: open_signals_cache[sym] = sig
+                        sig = {'symbol': sym, 'entry_price': curr, 'sl': sl, 'tp': tp, 'qty': qty, 'strat': strat, 'atr': atr}
+                        db_id = save_signal_db(sig)
+                        cache = {'id': db_id, 'symbol': sym, 'entry_price': curr, 'stop_loss': sl, 'target_price_1': tp, 'quantity': qty, 'strategy_name': strat}
+                        with locks['signals']: open_signals_cache[sym] = cache
                         
-                        # Log & Notify
                         with locks['logs']: scan_logs.appendleft({'t': datetime.now().strftime('%H:%M'), 's': sym, 'st': 'ACCEPTED', 'r': strat})
-                        send_telegram("BUY", {"symbol": sym, "strategy": strat, "price": curr, "sl": sl, "tp": tp})
+                        send_telegram("BUY", {"symbol": sym, "strategy": strat, "price": curr})
                 else:
-                    # Log rejection randomly to save space
-                    if random.random() < 0.1:
+                    if random.random() < 0.05:
                         with locks['logs']: scan_logs.appendleft({'t': datetime.now().strftime('%H:%M'), 's': sym, 'st': 'REJECTED', 'r': reason})
                 
                 time.sleep(0.2)
             time.sleep(60)
-        except Exception as e: logger.error(f"Engine: {e}"); time.sleep(30)
+        except Exception as e: logger.error(f"Loop: {e}"); time.sleep(30)
 
-# --- DB Helpers ---
+# --- DB Utils ---
 def save_signal_db(data):
     check_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO signals (symbol, entry_price, stop_loss, target_price_1, target_price_2, quantity, strategy_name, status, is_real_trade) VALUES (%s,%s,%s,%s,%s,%s,%s,'open',%s) RETURNING id", 
-            (data['symbol'], data['entry_price'], data['stop_loss'], data['target_price_1'], data['target_price_2'], data['quantity'], data['strategy_name'], not BOT_SETTINGS['paper_trading_mode']))
+            cur.execute("INSERT INTO signals (symbol, entry_price, stop_loss, target_price_1, target_price_2, quantity, strategy_name, status, is_real_trade, atr_at_entry) VALUES (%s,%s,%s,%s,%s,%s,%s,'open',%s,%s) RETURNING id", 
+            (data['symbol'], data['entry_price'], data['sl'], data['tp'], data['tp'], data['qty'], data['strat'], not BOT_SETTINGS['paper_trading_mode'], data['atr']))
             return cur.fetchone()['id']
     except: return int(time.time())
-
-def update_db_sl(id, sl):
-    check_db()
-    try:
-        with conn.cursor() as cur: cur.execute("UPDATE signals SET stop_loss=%s WHERE id=%s", (sl, id))
-    except: pass
 
 def close_signal_db(symbol, price, reason):
     check_db()
@@ -467,99 +400,82 @@ def close_signal_db(symbol, price, reason):
         send_telegram("SELL", {"symbol": symbol, "price": price, "profit": profit, "reason": reason})
     except: pass
 
-# --- 9. واجهة الويب (Flask + Chart.js) ---
+# --- Flask App ---
 app = Flask(__name__)
 CORS(app)
 
-HTML_TEMPLATE = """
+DASHBOARD = """
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
-<title>SmartBot Elite V7</title>
+<title>SmartBot V8 Algo Master</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet">
 <style>
-    :root { --bg: #0f172a; --card: #1e293b; --text: #e2e8f0; --accent: #6366f1; --green: #10b981; --red: #ef4444; --orange: #f59e0b; }
+    :root { --bg: #0f172a; --card: #1e293b; --text: #f1f5f9; --accent: #8b5cf6; --green: #10b981; --red: #ef4444; --orange: #f59e0b; }
     body { background: var(--bg); color: var(--text); font-family: 'Tajawal', sans-serif; margin: 0; padding: 20px; }
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-    .btn { padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer; font-weight: bold; color: white; transition: 0.3s; text-decoration: none; }
-    .btn-on { background: var(--green); box-shadow: 0 0 15px rgba(16, 185, 129, 0.4); }
-    .btn-off { background: var(--red); opacity: 0.7; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
-    .card { background: var(--card); padding: 20px; border-radius: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }
-    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-    th, td { padding: 12px; border-bottom: 1px solid #334155; text-align: right; }
-    .log-row { font-size: 0.9rem; }
-    .status-ACCEPTED { color: var(--green); font-weight: bold; }
-    .status-REJECTED { color: var(--orange); }
-    /* Radar Chart Container */
-    .chart-container { position: relative; height: 200px; width: 100%; }
+    .card { background: var(--card); padding: 20px; border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+    .btn { padding: 10px 20px; border-radius: 8px; border: none; font-weight: bold; cursor: pointer; color: white; text-decoration: none; }
+    .btn-run { background: var(--green); } .btn-stop { background: var(--red); }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9rem; }
+    th, td { padding: 10px; border-bottom: 1px solid #334155; text-align: right; }
+    .status-ACCEPTED { color: var(--green); } .status-REJECTED { color: var(--orange); }
 </style>
 </head>
 <body>
     <div class="header">
         <div>
-            <h1>🤖 SmartBot <span style="color:var(--accent)">Elite</span></h1>
-            <small id="connection">● متصل بالنظام</small>
+            <h1>🤖 SmartBot <span style="color:var(--accent)">V8 Master</span></h1>
+            <small style="color:#94a3b8">تطبيق استراتيجيات الفيديو التعليمي</small>
         </div>
         <div>
             <a href="/settings" class="btn" style="background:#334155">⚙️ الإعدادات</a>
         </div>
     </div>
 
-    <!-- Control & Market -->
     <div class="grid">
+        <!-- Control -->
         <div class="card">
-            <h3>حالة النظام</h3>
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+            <div style="display:flex; justify-content:space-between; align-items:center">
                 <div>
-                    <div id="statusText" style="font-size:1.2rem; font-weight:bold">--</div>
-                    <small id="modeText">--</small>
+                    <h2 id="statusTxt" style="margin:0">--</h2>
+                    <small id="modeTxt">--</small>
                 </div>
-                <button id="toggleBtn" class="btn btn-off" onclick="toggleBot()">تشغيل</button>
+                <button id="toggleBtn" class="btn btn-stop" onclick="toggle()">--</button>
             </div>
-            <hr style="border-color:#334155">
-            <div style="margin-top:10px">
-                <span>الصفقات المفتوحة: <b id="openCount">0</b></span>
+            <hr style="border-color:#334155; margin:15px 0">
+            <div>
+                <span>المؤشر العام: <b id="mktScore">0</b></span>
+                <span id="mktRegime" style="float:left">--</span>
             </div>
         </div>
 
+        <!-- Chart -->
         <div class="card">
-            <h3>رادار السوق (MTF)</h3>
-            <div style="display:flex; align-items:center;">
-                <div style="flex:1">
-                    <div style="font-size:2rem; font-weight:bold" id="mktScore">0</div>
-                    <div id="mktRegime" style="color:var(--orange)">--</div>
-                </div>
-                <div style="flex:1; height:150px">
-                    <canvas id="marketRadar"></canvas>
-                </div>
-            </div>
+            <h3>نمو المحفظة</h3>
+            <div style="height:150px"><canvas id="equityChart"></canvas></div>
         </div>
         
+        <!-- Radar -->
         <div class="card">
-             <h3>منحنى النمو (Equity)</h3>
-             <div style="height:150px">
-                <canvas id="equityChart"></canvas>
-             </div>
-             <div style="margin-top:5px; text-align:left">
-                <small>إجمالي الربح: <b id="totalPnl">0%</b></small>
-             </div>
+             <h3>قوة الاتجاه (MTF)</h3>
+             <div style="height:150px"><canvas id="radarChart"></canvas></div>
         </div>
     </div>
 
-    <!-- Trades & Logs -->
     <div class="grid">
         <div class="card">
             <h3>⚡ الصفقات النشطة</h3>
             <table>
-                <thead><tr><th>العملة</th><th>استراتيجية</th><th>السعر</th><th>الربح</th></tr></thead>
+                <thead><tr><th>العملة</th><th>الاستراتيجية</th><th>السعر</th><th>الربح</th></tr></thead>
                 <tbody id="tradesTable"></tbody>
             </table>
         </div>
         <div class="card">
-            <h3>🕵️ سجل الفحص (Spy Log)</h3>
+            <h3>📝 سجل الفحص (Live Logs)</h3>
             <div style="max-height:300px; overflow-y:auto">
                 <table>
                     <thead><tr><th>الوقت</th><th>الرمز</th><th>النتيجة</th><th>السبب</th></tr></thead>
@@ -570,147 +486,90 @@ HTML_TEMPLATE = """
     </div>
 
 <script>
-    // Charts
-    let radarChart, lineChart;
-    
-    function initCharts() {
-        // Radar
-        const ctxR = document.getElementById('marketRadar').getContext('2d');
-        radarChart = new Chart(ctxR, {
-            type: 'radar',
-            data: {
-                labels: ['1H', '4H', '1D'],
-                datasets: [{ label: 'Bullish Score', data: [50, 50, 50], backgroundColor: 'rgba(99, 102, 241, 0.5)', borderColor: '#6366f1' }]
-            },
-            options: { scales: { r: { min: 0, max: 100, ticks: { display: false } } }, plugins: { legend: { display: false } } }
-        });
-
-        // Line
-        const ctxL = document.getElementById('equityChart').getContext('2d');
-        lineChart = new Chart(ctxL, {
+    let chart, radar;
+    function init() {
+        const ctx = document.getElementById('equityChart').getContext('2d');
+        chart = new Chart(ctx, {
             type: 'line',
-            data: { labels: [], datasets: [{ label: 'PNL', data: [], borderColor: '#10b981', tension: 0.3, fill: true, backgroundColor: 'rgba(16, 185, 129, 0.1)' }] },
-            options: { maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { grid: { color: '#334155' } } } }
+            data: { labels: [], datasets: [{ label: 'Equity', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', fill: true, tension: 0.3 }] },
+            options: { plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { grid: { color: '#334155' } } }, maintainAspectRatio: false }
+        });
+        const ctxR = document.getElementById('radarChart').getContext('2d');
+        radar = new Chart(ctxR, {
+            type: 'radar',
+            data: { labels: ['1H', '4H', '1D'], datasets: [{ label: 'Score', data: [0,0,0], borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.5)' }] },
+            options: { scales: { r: { min: 0, max: 100, ticks: { display: false } } }, plugins: { legend: { display: false } }, maintainAspectRatio: false }
         });
     }
-
     function update() {
         fetch('/api/data').then(r=>r.json()).then(d => {
             // Control
             const btn = document.getElementById('toggleBtn');
-            const st = document.getElementById('statusText');
-            if(d.settings.enabled) {
-                btn.innerText = "إيقاف"; btn.className = "btn btn-on";
-                st.innerText = "✅ النظام يعمل"; st.style.color = "var(--green)";
-            } else {
-                btn.innerText = "تشغيل"; btn.className = "btn btn-off";
-                st.innerText = "⏸️ النظام متوقف"; st.style.color = "var(--red)";
-            }
-            document.getElementById('modeText').innerText = d.settings.paper ? "تداول ورقي" : "تداول حقيقي";
-            document.getElementById('openCount').innerText = d.signals.length;
-
+            const st = document.getElementById('statusTxt');
+            if(d.settings.enabled) { btn.innerText="إيقاف"; btn.className="btn btn-run"; st.innerText="يعمل ✅"; st.style.color="var(--green)"; }
+            else { btn.innerText="تشغيل"; btn.className="btn btn-stop"; st.innerText="متوقف 🛑"; st.style.color="var(--red)"; }
+            document.getElementById('modeTxt').innerText = d.settings.paper ? "تداول ورقي" : "تداول حقيقي";
+            
             // Market
             document.getElementById('mktScore').innerText = d.market.score.toFixed(0);
             document.getElementById('mktRegime').innerText = d.market.regime.toUpperCase();
             
-            // Update Radar
-            radarChart.data.datasets[0].data = [d.market.details['1h'], d.market.details['4h'], d.market.details['1d']];
-            radarChart.update();
-
-            // Trades Table
-            const tb = document.getElementById('tradesTable');
-            if(d.signals.length === 0) tb.innerHTML = "<tr><td colspan='4' style='text-align:center;color:#64748b'>لا توجد صفقات</td></tr>";
-            else {
-                tb.innerHTML = d.signals.map(s => {
-                    const pnl = ((d.prices[s.symbol]-s.entry_price)/s.entry_price)*100;
-                    return `<tr>
-                        <td><b>${s.symbol}</b></td>
-                        <td><small>${s.strategy_name}</small></td>
-                        <td>${d.prices[s.symbol]}</td>
-                        <td style="color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl.toFixed(2)}%</td>
-                    </tr>`;
-                }).join('');
-            }
-
-            // Logs Table
-            const lg = document.getElementById('logsTable');
-            lg.innerHTML = d.logs.map(l => `
-                <tr class="log-row">
-                    <td>${l.t}</td>
-                    <td>${l.s}</td>
-                    <td class="status-${l.st}">${l.st}</td>
-                    <td>${l.r}</td>
-                </tr>
-            `).join('');
-
-            // Equity Chart
+            // Charts
+            radar.data.datasets[0].data = [d.market.details['1h'], d.market.details['4h'], d.market.details['1d']];
+            radar.update();
             if(d.history.length > 0) {
-                lineChart.data.labels = d.history.map(h => h.date);
-                lineChart.data.datasets[0].data = d.history.map(h => h.pnl);
-                lineChart.update();
-                document.getElementById('totalPnl').innerText = d.history[d.history.length-1].pnl.toFixed(2) + "%";
+                chart.data.labels = d.history.map(h=>h.date);
+                chart.data.datasets[0].data = d.history.map(h=>h.pnl);
+                chart.update();
             }
+
+            // Trades
+            const tb = document.getElementById('tradesTable');
+            tb.innerHTML = d.signals.length ? d.signals.map(s => {
+                const pnl = ((d.prices[s.symbol]-s.entry_price)/s.entry_price)*100;
+                return `<tr><td><b>${s.symbol}</b></td><td><small>${s.strategy_name}</small></td><td>${d.prices[s.symbol]}</td><td style="color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl.toFixed(2)}%</td></tr>`;
+            }).join('') : "<tr><td colspan='4' style='text-align:center'>لا توجد صفقات</td></tr>";
+
+            // Logs
+            document.getElementById('logsTable').innerHTML = d.logs.map(l => `<tr><td>${l.t}</td><td>${l.s}</td><td class="status-${l.st}">${l.st}</td><td>${l.r}</td></tr>`).join('');
         });
     }
-
-    function toggleBot() { fetch('/api/toggle', {method:'POST'}).then(update); }
-    initCharts();
-    setInterval(update, 1500);
-    update();
+    function toggle() { fetch('/api/toggle', {method:'POST'}).then(update); }
+    init(); setInterval(update, 1000); update();
 </script>
 </body>
 </html>
 """
 
-SETTINGS_HTML = """
+SETTINGS_PAGE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
-<head><meta charset="utf-8"><title>Settings</title>
-<style>
-body{background:#0f172a;color:white;font-family:sans-serif;padding:20px;max-width:600px;margin:0 auto;}
-.card{background:#1e293b;padding:20px;border-radius:10px;}
-input{width:100%;padding:10px;background:#0f172a;border:1px solid #334155;color:white;margin-bottom:15px;border-radius:5px;}
-button{width:100%;padding:15px;background:#6366f1;color:white;border:none;border-radius:5px;cursor:pointer;font-weight:bold;}
-</style>
+<head><meta charset="utf-8"><title>الإعدادات</title>
+<style>body{background:#0f172a;color:white;font-family:sans-serif;padding:20px;max-width:600px;margin:0 auto;} .card{background:#1e293b;padding:20px;border-radius:10px;} input{width:100%;padding:10px;background:#0f172a;border:1px solid #334155;color:white;margin-bottom:15px;border-radius:5px;} button{width:100%;padding:15px;background:#8b5cf6;color:white;border:none;border-radius:5px;cursor:pointer;font-weight:bold;}</style>
 </head>
-<body>
-<div class="card">
-    <h1>⚙️ الإعدادات</h1>
-    <form action="/api/settings" method="POST">
-        <label>مبلغ التداول (USDT)</label>
-        <input type="number" name="amount" value="{{s.trade_amount_usdt}}">
-        <label>أقصى عدد صفقات</label>
-        <input type="number" name="max_trades" value="{{s.max_open_trades}}">
-        <label>عدد فلاتر السيولة</label>
-        <input type="number" name="limit" value="{{s.volume_filter_limit}}">
-        <div style="margin-bottom:15px">
-            <input type="checkbox" name="paper" style="width:auto" {% if s.paper_trading_mode %}checked{% endif %}>
-            <label>تداول ورقي (آمن)</label>
-        </div>
-        <button type="submit">حفظ</button>
-    </form>
-    <a href="/" style="display:block;text-align:center;margin-top:20px;color:#94a3b8">عودة</a>
-</div>
-</body>
-</html>
+<body><div class="card"><h1>⚙️ إعدادات البوت</h1><form action="/api/settings" method="POST">
+<label>قيمة الصفقة (USDT)</label><input type="number" name="amount" value="{{s.trade_amount_usdt}}">
+<label>أقصى عدد صفقات</label><input type="number" name="max_trades" value="{{s.max_open_trades}}">
+<label>مضاعف الوقف (ATR Multiplier)</label><input type="number" step="0.1" name="sl_mult" value="{{s.stop_loss_atr_multiplier}}">
+<label>مضاعف الوقف المتحرك (Trailing)</label><input type="number" step="0.1" name="trail_mult" value="{{s.trailing_atr_multiplier}}">
+<div style="margin-bottom:15px"><input type="checkbox" name="paper" style="width:auto" {% if s.paper_trading_mode %}checked{% endif %}><label> تداول ورقي</label></div>
+<button type="submit">حفظ</button></form><a href="/" style="display:block;text-align:center;margin-top:20px;color:#94a3b8">عودة</a></div></body></html>
 """
 
 @app.route('/')
-def index(): return render_template_string(HTML_TEMPLATE)
-
+def index(): return render_template_string(DASHBOARD)
 @app.route('/settings')
 def settings(): 
-    with locks['settings']: return render_template_string(SETTINGS_HTML, s=BOT_SETTINGS)
+    with locks['settings']: return render_template_string(SETTINGS_PAGE, s=BOT_SETTINGS)
 
 @app.route('/api/data')
 def api_data():
     with locks['market']: m = market_state.copy()
     with locks['signals']: s = list(open_signals_cache.values())
     with locks['prices']: p = live_prices.copy()
+    with locks['settings']: st = {'enabled': BOT_SETTINGS['is_trading_enabled'], 'paper': BOT_SETTINGS['paper_trading_mode']}
     with locks['logs']: l = list(scan_logs)
-    with locks['settings']: sett = {'enabled': BOT_SETTINGS['is_trading_enabled'], 'paper': BOT_SETTINGS['paper_trading_mode']}
     
-    # Performance History (Simulated from DB)
     hist = []
     try:
         check_db()
@@ -722,8 +581,7 @@ def api_data():
                 cum += r['profit_pct']
                 hist.append({'date': r['closed_at'].strftime('%H:%M'), 'pnl': cum})
     except: pass
-
-    return jsonify({"market": m, "signals": s, "prices": p, "settings": sett, "logs": l, "history": hist})
+    return jsonify({"market": m, "signals": s, "prices": p, "settings": st, "logs": l, "history": hist})
 
 @app.route('/api/toggle', methods=['POST'])
 def api_toggle():
@@ -731,16 +589,17 @@ def api_toggle():
     return jsonify({"status": "ok"})
 
 @app.route('/api/settings', methods=['POST'])
-def api_save_settings():
+def api_set():
     with locks['settings']:
         BOT_SETTINGS['trade_amount_usdt'] = float(request.form.get('amount'))
         BOT_SETTINGS['max_open_trades'] = int(request.form.get('max_trades'))
-        BOT_SETTINGS['volume_filter_limit'] = int(request.form.get('limit'))
+        BOT_SETTINGS['stop_loss_atr_multiplier'] = float(request.form.get('sl_mult'))
+        BOT_SETTINGS['trailing_atr_multiplier'] = float(request.form.get('trail_mult'))
         BOT_SETTINGS['paper_trading_mode'] = 'paper' in request.form
     return redirect('/')
 
 if __name__ == "__main__":
-    print("🚀 SmartBot ELITE V7 Started...")
+    print("🚀 SmartBot V8 Started...")
     init_db()
-    Thread(target=main_engine, daemon=True).start()
+    Thread(target=main_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=False)
