@@ -24,9 +24,9 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('smart_bot_v8.log', encoding='utf-8'), logging.StreamHandler()]
+    handlers=[logging.FileHandler('smart_bot_v9.log', encoding='utf-8'), logging.StreamHandler()]
 )
-logger = logging.getLogger('SmartBot_V8')
+logger = logging.getLogger('SmartBot_V9')
 
 try:
     API_KEY = config('BINANCE_API_KEY')
@@ -44,15 +44,15 @@ BOT_SETTINGS = {
     "paper_trading_mode": True,
     "trade_amount_usdt": 20.0,
     "max_open_trades": 5,
-    "stop_loss_atr_multiplier": 2.0, # From video concept
-    "trailing_atr_multiplier": 2.3,  # Specific value from video
+    "stop_loss_atr_multiplier": 2.0,
+    "trailing_atr_multiplier": 2.3,
     "volume_filter_limit": 40
 }
 
 LEADING_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT']
 market_state = {
     "score": 50, "regime": "sideways", 
-    "details": {"1h": 50, "4h": 50, "1d": 50},
+    "details": {"15m": 50, "1h": 50, "4h": 50}, # تم تحديث الفريمات
     "last_update": None
 }
 
@@ -100,6 +100,7 @@ def send_telegram(event, payload):
         msg = (f"🚀 *New Trade ({payload['symbol']})*\n"
                f"Strategy: `{payload['strategy']}`\n"
                f"Price: `{payload['price']}`\n"
+               f"Market Regime: `{payload['regime']}`\n"
                f"Mode: {'📝 Paper' if BOT_SETTINGS['paper_trading_mode'] else '💵 Real'}")
     elif event == "SELL":
         emoji = "✅" if payload['profit'] > 0 else "🔻"
@@ -112,7 +113,7 @@ def send_telegram(event, payload):
                       data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
     except: pass
 
-# --- 5. التحليل الفني (تم إضافة AO من الفيديو) ---
+# --- 5. التحليل الفني ---
 def fetch_data(client, symbol, interval, limit=100):
     try:
         klines = client.get_historical_klines(symbol, interval, limit=limit)
@@ -124,7 +125,9 @@ def fetch_data(client, symbol, interval, limit=100):
 
 def add_indicators(df):
     df = df.copy()
-    # Standard Indicators
+    # Moving Averages
+    df['ema9'] = df['close'].ewm(span=9).mean()   # For Crossover Strategy
+    df['ema21'] = df['close'].ewm(span=21).mean() # For Crossover Strategy
     df['ema50'] = df['close'].ewm(span=50).mean()
     df['ema200'] = df['close'].ewm(span=200).mean()
     
@@ -142,47 +145,67 @@ def add_indicators(df):
     df['bb_lower'] = df['bb_mid'] - (2*std)
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
     
-    # ATR (Video Specific: used for exits)
+    # ATR
     df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
     df['atr'] = df['tr'].rolling(14).mean()
-    df['atr35'] = df['tr'].rolling(35).mean() # For Video Strategy Trailing
+    df['atr35'] = df['tr'].rolling(35).mean()
     
-    # Awesome Oscillator (Video Strategy Core)
+    # Awesome Oscillator (AO)
     median_price = (df['high'] + df['low']) / 2
     df['ao'] = median_price.rolling(5).mean() - median_price.rolling(34).mean()
     
     # Volume MA
     df['vol_ma'] = df['volume'].rolling(20).mean()
     
-    # Recent High/Low (For Breakout)
-    df['recent_high'] = df['high'].rolling(20).max() # 20 candles lookback
+    # Recent High/Low
+    df['recent_high'] = df['high'].rolling(20).max()
     
     return df.fillna(0)
 
-# --- استراتيجيات التداول (محدثة من الفيديو) ---
+# --- استراتيجيات التداول (تحديث الفيديو + تحسين الفلتر) ---
 def get_strategy_signal(symbol, df, regime):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # الفلتر العام (تأكيد الحجم والاتجاه)
-    if last['volume'] < last['vol_ma'] * 0.8: return None, "Low Volume"
+    # 1. تخفيف فلتر الحجم (Volume Filter Relaxed)
+    # بدلاً من 0.8، جعلناها 0.5 لقبول صفقات في السيولة المتوسطة
+    if last['volume'] < last['vol_ma'] * 0.5: 
+        return None, "Low Volume"
     
-    # 1. AO Breakout Strategy (مستوحاة من الفيديو)
-    # الشروط: AO يعبر الصفر للأعلى + السعر يكسر قمة الـ 20 شمعة السابقة
-    if last['ao'] > 0 and prev['ao'] <= 0: # Zero Cross
-        if last['close'] > prev['recent_high']: # Breakout Confirmation
-            if regime == "bullish" or regime == "sideways":
-                return "AO_Breakout", "AO Cross + High Breakout"
-    
-    # 2. Volatility Squeeze Breakout
+    # --- استراتيجيات السوق الصاعد (Bullish) ---
     if regime == "bullish":
-        if prev['bb_width'] < 0.15 and last['close'] > last['bb_upper']:
-            return "Vol_Breakout", "Bollinger Squeeze Break"
+        # Strategy A: AO Breakout (استراتيجية الزخم من الفيديو)
+        if last['ao'] > 0 and prev['ao'] <= 0:
+            if last['close'] > prev['recent_high']:
+                return "AO_Breakout", "Bullish AO Cross + Breakout"
+        
+        # Strategy B: EMA Golden Cross (Trend Following)
+        # تقاطع متوسط 9 فوق 21 مع وجود السعر فوق 50
+        if prev['ema9'] < prev['ema21'] and last['ema9'] > last['ema21']:
+            if last['close'] > last['ema50']:
+                return "EMA_Cross_Bull", "EMA 9/21 Cross"
 
-    # 3. Trend Pullback
-    if regime == "bullish":
+    # --- استراتيجيات السوق العرضي (Sideways) ---
+    if regime == "sideways":
+        # Strategy C: RSI Mean Reversion (استراتيجية الارتداد - الفيديو)
+        # شراء من القاع في الحركة العرضية
+        if last['rsi'] < 30 and last['close'] > last['bb_lower']:
+            return "RSI_Reversion", "Oversold RSI in Range"
+        
+        # Strategy D: Bollinger Squeeze
+        if prev['bb_width'] < 0.15 and last['close'] > last['bb_upper']:
+            return "Vol_Squeeze", "BB Squeeze Breakout"
+
+    # --- استراتيجيات السوق الهابط (Bearish) ---
+    if regime == "bearish":
+        # في السوق الهابط نكون حذرين جداً ونبحث فقط عن ارتدادات عميقة (Deep Oversold)
+        # Strategy E: Deep Dip Catch
+        if last['rsi'] < 25: # تشبع بيعي قوي جداً
+            return "Deep_Dip", "Extreme Oversold (Risky)"
+
+    # Fallback: Trend Pullback (يعمل في الصاعد والعرضي المائل للصعود)
+    if regime != "bearish":
         if last['close'] > last['ema200'] and last['rsi'] < 55 and last['rsi'] > 40 and last['close'] > last['ema50']:
-             # Simple pullback to EMA50 area
             return "Trend_Pullback", "EMA50 Bounce"
 
     return None, "No Signal"
@@ -192,11 +215,14 @@ def calculate_params(df, strategy):
     atr = last['atr']
     close = last['close']
     
-    # معايير الفيديو: Stop = ATR based
-    if strategy == "AO_Breakout":
+    # ضبط الأهداف والوقف بناء على نوع الاستراتيجية
+    if strategy == "AO_Breakout" or strategy == "EMA_Cross_Bull":
         sl = close - (atr * 2.0)
-        tp = close + (atr * 5.0) # هدف مفتوح للترند
-    elif strategy == "Vol_Breakout":
+        tp = close + (atr * 5.0) # نترك الهدف مفتوح للترند
+    elif strategy == "RSI_Reversion" or strategy == "Deep_Dip":
+        sl = close - (atr * 1.5) # وقف خسارة أضيق
+        tp = close + (atr * 2.5) # هدف سريع (Scalping logic)
+    elif strategy == "Vol_Squeeze":
         sl = close - (atr * 2.0)
         tp = close + (atr * 4.0)
     else:
@@ -207,31 +233,33 @@ def calculate_params(df, strategy):
 
 # --- 6. المحرك الذكي (Active Brain) ---
 def reanalyze_position(symbol, signal, df, regime):
-    """
-    تطبيق منطق الفيديو: Trailing Stop باستخدام ATR
-    """
     last = df.iloc[-1]
     curr = float(last['close'])
     entry = float(signal['entry_price'])
     sl = float(signal['stop_loss'])
+    strat = signal.get('strategy_name', '')
     
     profit_pct = (curr - entry) / entry * 100
     
-    # Video Logic: Trailing Stop = 2.3 * ATR(35)
-    # نطبقه فقط عندما تكون الصفقة رابحة لضمان حجز الربح
+    # Trailing Stop Logic
     if profit_pct > 1.0:
         atr35 = last['atr35']
-        trailing_dist = atr35 * BOT_SETTINGS['trailing_atr_multiplier']
+        # تسريع الوقف المتحرك في استراتيجيات الارتداد
+        multiplier = 1.5 if "Reversion" in strat or "Dip" in strat else BOT_SETTINGS['trailing_atr_multiplier']
         
+        trailing_dist = atr35 * multiplier
         new_sl = curr - trailing_dist
         
-        # تحديث الوقف فقط إذا كان أعلى من الوقف الحالي (لا ننزله أبداً)
         if new_sl > sl:
-            return "UPDATE_SL", new_sl, "ATR Trailing Logic"
+            return "UPDATE_SL", new_sl, "ATR Trailing"
 
-    # Exit if trend reverses violently below EMA200 in bullish setup
-    if regime == "bearish" and curr < last['ema200'] and profit_pct < -1:
+    # Exit Logic: Panic Sell if Trend Reverses
+    if regime == "bearish" and curr < last['ema200'] and profit_pct < -1.5:
         return "CLOSE_NOW", curr, "Trend Reversal (Below EMA200)"
+    
+    # RSI Exit for Mean Reversion strategies
+    if "Reversion" in strat and last['rsi'] > 65:
+        return "CLOSE_NOW", curr, "RSI Target Reached"
 
     return "HOLD", 0, ""
 
@@ -239,6 +267,7 @@ def reanalyze_position(symbol, signal, df, regime):
 def execute_order(client, symbol, side, qty):
     if BOT_SETTINGS['paper_trading_mode']: return True
     try:
+        # التأكد من دقة الكمية (Precision) يمكن إضافتها هنا لاحقاً
         client.create_order(symbol=symbol, side=side, type='MARKET', quantity=qty)
         return True
     except Exception as e:
@@ -272,7 +301,6 @@ def trade_manager(client):
                     
                     if act == "UPDATE_SL":
                         with locks['signals']: open_signals_cache[sym]['stop_loss'] = val
-                        # Update DB
                         check_db()
                         with conn.cursor() as cur: cur.execute("UPDATE signals SET stop_loss=%s WHERE id=%s", (val, sig['id']))
                         send_telegram("UPDATE", {"symbol": sym, "new_sl": val})
@@ -289,27 +317,30 @@ def trade_manager(client):
             time.sleep(5)
         except: time.sleep(5)
 
-# --- 8. تحليل هيكل السوق ---
+# --- 8. تحليل هيكل السوق (محدث: 15m, 1H, 4H) ---
 def analyze_mtf(client):
     global market_state
-    timeframes = ['1h', '4h', '1d']
-    tf_scores = {'1h':0, '4h':0, '1d':0}
+    # تحديث الفريمات كما طلبت
+    timeframes = ['15m', '1h', '4h']
+    tf_scores = {'15m':0, '1h':0, '4h':0}
     
     for sym in LEADING_SYMBOLS:
         for tf in timeframes:
             df = fetch_data(client, sym, tf, 100)
             if df is None: continue
             close = df['close'].iloc[-1]
-            ema = df['close'].ewm(span=200).mean().iloc[-1]
-            if close > ema: tf_scores[tf] += 25 # Max 100 per TF
+            ema200 = df['close'].ewm(span=200).mean().iloc[-1]
+            
+            # منطق تقييم بسيط: السعر فوق EMA200 = إيجابي
+            if close > ema200: tf_scores[tf] += 25 # Max 100 per TF (4 symbols * 25)
             
     final = {k: v for k,v in tf_scores.items()}
-    score = (final['1h']*0.2 + final['4h']*0.3 + final['1d']*0.5)
-    regime = "bullish" if score >= 60 else ("bearish" if score <= 40 else "sideways")
+    # وزن أكبر للفريمات الأكبر، لكن الـ 15 دقيقة يعطي إشارة سريعة
+    score = (final['15m']*0.2 + final['1h']*0.3 + final['4h']*0.5)
+    
+    regime = "bullish" if score >= 60 else ("bearish" if score <= 30 else "sideways")
     
     with locks['market']:
-        if market_state['regime'] != regime:
-            pass # Could verify change
         market_state = {"score": score, "regime": regime, "details": final, "last_update": datetime.now()}
 
 # --- 9. Main Loop ---
@@ -337,9 +368,9 @@ def main_loop():
             
             analyze_mtf(client)
             
-            # Volume Filter
             tickers = client.get_ticker()
             valid = [t for t in tickers if t['symbol'] in file_symbols]
+            # فرز العملات حسب السيولة
             sorted_tk = sorted(valid, key=lambda x: float(x['quoteVolume']), reverse=True)[:limit]
             
             for t in sorted_tk:
@@ -368,9 +399,9 @@ def main_loop():
                         with locks['signals']: open_signals_cache[sym] = cache
                         
                         with locks['logs']: scan_logs.appendleft({'t': datetime.now().strftime('%H:%M'), 's': sym, 'st': 'ACCEPTED', 'r': strat})
-                        send_telegram("BUY", {"symbol": sym, "strategy": strat, "price": curr})
+                        send_telegram("BUY", {"symbol": sym, "strategy": strat, "price": curr, "regime": regime})
                 else:
-                    if random.random() < 0.05:
+                    if random.random() < 0.05: # Log some rejections mostly to avoid spam
                         with locks['logs']: scan_logs.appendleft({'t': datetime.now().strftime('%H:%M'), 's': sym, 'st': 'REJECTED', 'r': reason})
                 
                 time.sleep(0.2)
@@ -409,7 +440,7 @@ DASHBOARD = """
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
-<title>SmartBot V8 Algo Master</title>
+<title>SmartBot V9 Master</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet">
 <style>
@@ -428,8 +459,8 @@ DASHBOARD = """
 <body>
     <div class="header">
         <div>
-            <h1>🤖 SmartBot <span style="color:var(--accent)">V8 Master</span></h1>
-            <small style="color:#94a3b8">تطبيق استراتيجيات الفيديو التعليمي</small>
+            <h1>🤖 SmartBot <span style="color:var(--accent)">V9 Master</span></h1>
+            <small style="color:#94a3b8">تحديث استراتيجيات السوق الهابط والمتقلب</small>
         </div>
         <div>
             <a href="/settings" class="btn" style="background:#334155">⚙️ الإعدادات</a>
@@ -461,7 +492,7 @@ DASHBOARD = """
         
         <!-- Radar -->
         <div class="card">
-             <h3>قوة الاتجاه (MTF)</h3>
+             <h3>قوة الاتجاه (15m/1H/4H)</h3>
              <div style="height:150px"><canvas id="radarChart"></canvas></div>
         </div>
     </div>
@@ -497,7 +528,7 @@ DASHBOARD = """
         const ctxR = document.getElementById('radarChart').getContext('2d');
         radar = new Chart(ctxR, {
             type: 'radar',
-            data: { labels: ['1H', '4H', '1D'], datasets: [{ label: 'Score', data: [0,0,0], borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.5)' }] },
+            data: { labels: ['15m', '1H', '4H'], datasets: [{ label: 'Score', data: [0,0,0], borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.5)' }] },
             options: { scales: { r: { min: 0, max: 100, ticks: { display: false } } }, plugins: { legend: { display: false } }, maintainAspectRatio: false }
         });
     }
@@ -515,7 +546,7 @@ DASHBOARD = """
             document.getElementById('mktRegime').innerText = d.market.regime.toUpperCase();
             
             // Charts
-            radar.data.datasets[0].data = [d.market.details['1h'], d.market.details['4h'], d.market.details['1d']];
+            radar.data.datasets[0].data = [d.market.details['15m'], d.market.details['1h'], d.market.details['4h']];
             radar.update();
             if(d.history.length > 0) {
                 chart.data.labels = d.history.map(h=>h.date);
@@ -599,7 +630,7 @@ def api_set():
     return redirect('/')
 
 if __name__ == "__main__":
-    print("🚀 SmartBot V8 Started...")
+    print("🚀 SmartBot V9 Started...")
     init_db()
     Thread(target=main_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=False)
