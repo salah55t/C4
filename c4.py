@@ -663,3 +663,10 @@ DASHBOARD_HTML = """
     </script>
 </body>
 </html>
+"""
+
+if __name__ == "__main__":
+    init_db()
+    Thread(target=bot_loop, daemon=True).start()
+    logger.info("🖥️ Web Dashboard running on port 5000")
+    app.run(host='0.0.0.0', port=5000)
