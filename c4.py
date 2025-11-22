@@ -22,7 +22,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[logging.FileHandler('smart_bot_v11.log', encoding='utf-8'), logging.StreamHandler()]
 )
-logger = logging.getLogger('SmartBot_Ultimate')
+logger = logging.getLogger('SmartBot_Fixed')
 
 try:
     API_KEY = config('BINANCE_API_KEY')
@@ -39,12 +39,12 @@ BOT_SETTINGS = {
     "is_trading_enabled": False,
     "paper_trading_mode": True,
     "trade_amount_usdt": 50.0,
-    "max_open_trades": 5,             # زيادة عدد الصفقات المسموحة
+    "max_open_trades": 5,
     "stop_loss_atr_multiplier": 1.8,  
     "trailing_atr_multiplier": 2.5,
-    "volume_filter_limit": 60,        # فحص أكبر 60 عملة
-    "breakeven_trigger_pct": 1.2,     # تأمين الصفقة عند ربح 1.2%
-    "max_hold_time_hours": 4          # أقصى مدة احتفاظ
+    "volume_filter_limit": 60,
+    "breakeven_trigger_pct": 1.2,
+    "max_hold_time_hours": 4
 }
 
 LEADING_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
@@ -91,14 +91,14 @@ def init_db():
                     last_analysis TEXT 
                 );
             """)
-        logger.info("✅ Database V11 Initialized.")
+        logger.info("✅ Database V11 Connected.")
     except Exception as e: logger.error(f"DB Error: {e}")
 
 def check_db():
     global conn
     if conn is None or conn.closed != 0: init_db()
 
-# --- 4. نظام التنبيهات العربي المتطور ---
+# --- 4. نظام التنبيهات العربي ---
 def send_telegram(event, payload):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     
@@ -140,7 +140,7 @@ def send_telegram(event, payload):
                       data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
     except Exception as e: logger.error(f"Telegram Error: {e}")
 
-# --- 5. التحليل الفني المتقدم ---
+# --- 5. التحليل الفني ---
 def fetch_data(client, symbol, interval, limit=100):
     try:
         klines = client.get_historical_klines(symbol, interval, limit=limit)
@@ -171,7 +171,7 @@ def add_indicators(df):
     df['macd'] = ema12 - ema26
     df['macd_signal'] = df['macd'].ewm(span=9).mean()
 
-    # ADX (مؤشر قوة الترند)
+    # ADX
     df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
     df['atr'] = df['tr'].rolling(14).mean()
     df['up_move'] = df['high'] - df['high'].shift(1)
@@ -195,56 +195,46 @@ def add_indicators(df):
 
     return df.fillna(0)
 
-# --- 6. محرك الاستراتيجيات الذكي ---
+# --- 6. محرك الاستراتيجيات ---
 def get_strategy_signal(symbol, df, regime):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # === 1. فلتر السيولة المخفف (Smart Volume Filter) ===
-    # خفضنا النسبة لـ 25% لقبول المزيد من العملات
+    # فلتر السيولة المخفف (25%)
     vol_threshold = last['vol_ma'] * 0.25
-    
-    # استثناء: إذا كان هناك زخم سعري قوي جداً، نقبل بسيولة أقل قليلاً
     is_high_momentum = last['rsi'] > 60 and last['macd'] > last['macd_signal']
     
     if last['volume'] < vol_threshold and not is_high_momentum:
         return None, "ضعف سيولة"
 
-    # === 2. استراتيجيات السوق الصاعد (Bullish) ===
+    # سوق صاعد
     if "bull" in regime:
-        # A. Trend Sniper (تم تخفيف شرط ADX لـ 15 بدلاً من 20)
         if last['adx'] > 15: 
             if last['close'] > last['ema200'] and last['ema9'] > last['ema21']:
-                # شرط الدخول: تقاطع الماكد أو اختراق RSI لـ 50
                 if (last['macd'] > last['macd_signal'] and prev['macd'] <= prev['macd_signal']):
                     return "Trend_Sniper", "تقاطع إيجابي مع ترند قوي"
 
-        # B. Quick Scalp (للسرعة)
-        # دخول سريع إذا السعر فوق المتوسطات والـ RSI غير متشبع
         if last['close'] > last['ema50'] and last['rsi'] > 50 and last['rsi'] < 70:
-            if last['high'] > prev['high']: # كسر شمعة سابقة
+            if last['high'] > prev['high']:
                 return "Quick_Scalp", "زخم لحظي سريع"
 
-    # === 3. استراتيجيات السوق العرضي (Sideways) ===
+    # سوق عرضي
     elif "sideways" in regime:
-        # C. Precision Reversion (ارتداد دقيق)
         if last['close'] < last['bb_lower'] and last['rsi'] < 35:
-             return "Sniper_Reversion", "ارتداد من قاع القناة (تشبع بيعي)"
+             return "Sniper_Reversion", "ارتداد من قاع القناة"
 
-    # === 4. استراتيجيات السوق الهابط (Bearish) ===
+    # سوق هابط
     elif "bearish" in regime:
-        # D. Dead Cat Bounce (حذر جداً)
-        if last['rsi'] < 25: # تشبع بيعي حاد
+        if last['rsi'] < 25:
             return "Deep_Dip", "صيد القاع (خطر)"
 
-    # === 5. الجوكر (Golden Cross) ===
-    # تعمل دائماً إذا تحقق التقاطع الذهبي لمتوسط 50 مع 200
+    # الجوكر
     if last['ema50'] > last['ema200'] and prev['ema50'] <= prev['ema200']:
          return "Golden_Cross", "التقاطع الذهبي 50/200"
 
     return None, "لا توجد شروط مطابقة"
 
-# --- 7. مدير الصفقات الدوري والمحلل (The Analyst) ---
+# --- 7. مدير الصفقات الدوري ---
 def manage_trade(symbol, signal, df, regime):
     last = df.iloc[-1]
     curr = float(last['close'])
@@ -253,40 +243,36 @@ def manage_trade(symbol, signal, df, regime):
     atr = float(last['atr'])
     
     profit_pct = (curr - entry) / entry * 100
-    duration = (datetime.now() - signal['entry_time']).total_seconds() / 3600 # بالساعات
+    duration = (datetime.now() - signal['entry_time']).total_seconds() / 3600 # hours
 
-    # تحليل صحة الصفقة للتسجيل
     health_status = "مستقر"
     if profit_pct > 1: health_status = "ربح متنامي 🟢"
     elif profit_pct < -1: health_status = "خسارة 🔴"
     elif duration > 2: health_status = "ركود زمني ⚠️"
 
-    # 1. تأمين الصفقة (Breakeven)
+    # تأمين الصفقة
     if profit_pct >= BOT_SETTINGS['breakeven_trigger_pct'] and sl < entry:
-        new_sl = entry * 1.0015 # فوق الدخول قليلاً لتغطية العمولة
+        new_sl = entry * 1.0015
         return "UPDATE_SL", new_sl, "تأمين الصفقة (بدون مخاطرة)", health_status
 
-    # 2. وقف الخسارة الذكي (Smart Trailing)
-    # كلما زاد الربح، اقترب الوقف أكثر
+    # وقف الخسارة الذكي
     if profit_pct >= 2.5:
-        new_sl = curr - (atr * 1.5) # وقف ضيق جداً لحماية الأرباح الكبيرة
+        new_sl = curr - (atr * 1.5)
         if new_sl > sl:
-            return "UPDATE_SL", new_sl, "حجز أرباح متقدم (وقف ضيق)", health_status
+            return "UPDATE_SL", new_sl, "حجز أرباح متقدم", health_status
     elif profit_pct >= 1.5:
-        new_sl = curr - (atr * 2.0) # وقف متوسط
+        new_sl = curr - (atr * 2.0)
         if new_sl > sl:
             return "UPDATE_SL", new_sl, "حجز أرباح (ATR)", health_status
 
-    # 3. الخروج الزمني (Time Decay)
-    # إذا مرت 4 ساعات والربح أقل من 0.5%، نخرج
+    # الخروج الزمني
     if duration > BOT_SETTINGS['max_hold_time_hours'] and profit_pct < 0.5:
-        return "CLOSE_NOW", curr, "انتهاء الوقت (ركود السعر)", health_status
+        return "CLOSE_NOW", curr, "انتهاء الوقت (ركود)", health_status
 
-    # 4. الخروج عند انعكاس الترند (Panic Exit)
+    # الخروج عند الانعكاس
     if regime == "bearish" and curr < last['ema50'] and profit_pct < -1.5:
-        return "CLOSE_NOW", curr, "انعكاس الترند العام (حماية)", health_status
+        return "CLOSE_NOW", curr, "انعكاس الترند العام", health_status
     
-    # 5. الخروج عند التشبع الشرائي القوي (فقط لصفقات الارتداد)
     if "Reversion" in signal['strategy_name'] and last['rsi'] > 68:
          return "CLOSE_NOW", curr, "وصول للهدف (RSI)", health_status
 
@@ -295,7 +281,6 @@ def manage_trade(symbol, signal, df, regime):
 # --- 8. تحليل هيكل السوق ---
 def analyze_market_structure(client):
     global market_state
-    # أوزان الفريمات: 4 ساعات هو الأهم للاتجاه العام
     tf_weights = {'15m': 0.2, '1h': 0.3, '4h': 0.5}
     total_score = 0
     
@@ -307,8 +292,6 @@ def analyze_market_structure(client):
             
             close = df['close'].iloc[-1]
             ema200 = df['close'].ewm(span=200).mean().iloc[-1]
-            
-            # نقاط إيجابية
             if close > ema200: sym_score += 100 * weight
             
         total_score += sym_score
@@ -321,19 +304,14 @@ def analyze_market_structure(client):
     else: regime = "sideways"
     
     with locks['market']:
-        market_state = {
-            "score": final_avg_score, 
-            "regime": regime,
-            "last_update": datetime.now()
-        }
+        market_state = {"score": final_avg_score, "regime": regime, "last_update": datetime.now()}
     
     logger.info(f"📊 تحليل السوق: {final_avg_score:.1f} | الحالة: {regime}")
 
-# --- 9. حلقات التنفيذ الرئيسية ---
+# --- 9. التنفيذ ---
 def execute_trade(client, symbol, side, qty):
     if BOT_SETTINGS['paper_trading_mode']: return True
     try:
-        # هنا يتم وضع كود التنفيذ الحقيقي مع باينانس
         # client.create_order(...) 
         return True
     except Exception as e:
@@ -342,7 +320,7 @@ def execute_trade(client, symbol, side, qty):
 
 def bot_loop():
     client = Client(API_KEY, API_SECRET)
-    logger.info("🚀 SmartBot Ultimate Engine Started")
+    logger.info("🚀 SmartBot Fixed Engine Started")
     
     try:
         with open('crypto_list.txt') as f:
@@ -352,7 +330,6 @@ def bot_loop():
 
     while True:
         try:
-            # تحديث الإعدادات
             with locks['settings']:
                 enabled = BOT_SETTINGS['is_trading_enabled']
                 limit = BOT_SETTINGS['volume_filter_limit']
@@ -364,11 +341,10 @@ def bot_loop():
                 time.sleep(10)
                 continue
 
-            # 1. تحليل السوق الدوري
             analyze_market_structure(client)
             with locks['market']: regime = market_state['regime']
 
-            # 2. مراقبة وتحليل الصفقات المفتوحة
+            # إدارة الصفقات
             with locks['signals']: open_trades = list(open_signals_cache.values())
             
             for trade in open_trades:
@@ -386,15 +362,14 @@ def bot_loop():
                 
                 if not exit_reason:
                     action, val, note, health = manage_trade(sym, trade, df, regime)
-                    
-                    # تحديث التحليل في الكاش للعرض
                     open_signals_cache[sym]['last_analysis'] = f"{health} - {datetime.now().strftime('%H:%M')}"
                     
                     if action == "UPDATE_SL":
                         open_signals_cache[sym]['stop_loss'] = val
                         check_db()
+                        # FIX: Ensure val is float
                         with conn.cursor() as cur: 
-                            cur.execute("UPDATE signals_v11 SET stop_loss=%s, last_analysis=%s WHERE id=%s", (val, health, trade['id']))
+                            cur.execute("UPDATE signals_v11 SET stop_loss=%s, last_analysis=%s WHERE id=%s", (float(val), health, trade['id']))
                         send_telegram("UPDATE", {"symbol": sym, "new_sl": val, "reason": note})
                     elif action == "CLOSE_NOW":
                         exit_reason = f"خروج ذكي: {note}"
@@ -403,11 +378,10 @@ def bot_loop():
                     execute_trade(client, sym, 'SELL', trade['quantity'])
                     close_trade_system(sym, curr_price, exit_reason, paper)
 
-            # 3. البحث عن فرص جديدة
+            # البحث عن فرص
             if len(open_signals_cache) < max_t:
                 tickers = client.get_ticker()
                 valid_tickers = [t for t in tickers if t['symbol'] in symbols]
-                # ترتيب حسب السيولة
                 valid_tickers.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
                 top_coins = valid_tickers[:limit]
                 
@@ -416,7 +390,6 @@ def bot_loop():
                     sym = t['symbol']
                     if sym in open_signals_cache: continue
                     
-                    # الفحص على فريم 15 دقيقة للدخول
                     df = fetch_data(client, sym, '15m', 100) 
                     if df is None: continue
                     df = add_indicators(df)
@@ -427,20 +400,19 @@ def bot_loop():
                         curr = df['close'].iloc[-1]
                         atr = df['atr'].iloc[-1]
                         
-                        # حساب الأهداف
                         sl = curr - (atr * BOT_SETTINGS['stop_loss_atr_multiplier'])
                         tp = curr + (atr * 3.0) 
                         qty = amt / curr
                         
                         if execute_trade(client, sym, 'BUY', qty):
+                            # Pass regime for telegram
                             record_new_trade(sym, curr, sl, tp, qty, strat, paper, regime)
                             logger.info(f"✅ ENTRY: {sym} | {strat}")
                     else:
-                         # تسجيل الرفض بشكل أقل تكراراً لتجنب الازدحام
                          if random.random() < 0.05: 
                             with locks['logs']: scan_logs.appendleft({'t': datetime.now().strftime('%H:%M'), 's': sym, 'st': 'تخطي', 'r': reason})
                     
-                    time.sleep(0.3) # تأخير بسيط لتجنب الحظر
+                    time.sleep(0.3)
 
             time.sleep(20)
 
@@ -448,11 +420,17 @@ def bot_loop():
             logger.error(f"Main Loop Error: {e}")
             time.sleep(10)
 
-# --- 10. أدوات النظام وقاعدة البيانات ---
+# --- 10. أدوات النظام (Fixed Casting Error) ---
 def record_new_trade(symbol, price, sl, tp, qty, strat, is_paper, regime):
     check_db()
     try:
         mode = 'PAPER' if is_paper else 'REAL'
+        # FIX: Explicitly convert numpy types to python float
+        price = float(price)
+        sl = float(sl)
+        tp = float(tp)
+        qty = float(qty)
+        
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO signals_v11 
@@ -486,8 +464,11 @@ def close_trade_system(symbol, price, reason, is_paper):
                 del open_signals_cache[symbol]
         
         if not trade: return
-
+        
+        # FIX: Convert types
+        price = float(price)
         profit_pct = ((price - trade['entry_price']) / trade['entry_price']) * 100
+        profit_pct = float(profit_pct)
         duration = int((datetime.now() - trade['entry_time']).total_seconds() / 60)
         
         with conn.cursor() as cur:
@@ -503,13 +484,12 @@ def close_trade_system(symbol, price, reason, is_paper):
 
     except Exception as e: logger.error(f"Close Trade Error: {e}")
 
-# --- 11. واجهة التحكم (Web Dashboard) ---
+# --- 11. واجهة التحكم ---
 app = Flask(__name__)
 CORS(app)
 
 @app.route('/')
-def index():
-    return render_template_string(DASHBOARD_HTML)
+def index(): return render_template_string(DASHBOARD_HTML)
 
 @app.route('/api/data')
 def api_data():
@@ -534,7 +514,6 @@ def api_data():
                 hist.append({'date': r['closed_at'].strftime('%d %H:%M'), 'pnl': cum})
             stats['total_pnl'] = cum
     except: pass
-    
     return jsonify({"market": m, "signals": s, "prices": p, "settings": st, "logs": l, "history": hist, "stats": stats})
 
 @app.route('/api/toggle', methods=['POST'])
@@ -547,7 +526,7 @@ DASHBOARD_HTML = """
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>SmartBot Ultimate V11</title>
+    <title>SmartBot Ultimate V11.1</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap" rel="stylesheet">
     <style>
@@ -566,8 +545,8 @@ DASHBOARD_HTML = """
 <body>
     <div class="header">
         <div>
-            <h1>🚀 SmartBot <span style="color:var(--accent)">Ultimate V11</span></h1>
-            <small style="color:#94a3b8">نظام إدارة المحفظة الذكي مع تعريب كامل</small>
+            <h1>🚀 SmartBot <span style="color:var(--accent)">Ultimate V11.1</span></h1>
+            <small style="color:#94a3b8">نظام إدارة المحفظة الذكي (Fixed)</small>
         </div>
         <div>
             <button id="toggleBtn" class="btn" onclick="toggleBot()">جاري التحميل...</button>
@@ -684,10 +663,3 @@ DASHBOARD_HTML = """
     </script>
 </body>
 </html>
-"""
-
-if __name__ == "__main__":
-    init_db()
-    Thread(target=bot_loop, daemon=True).start()
-    logger.info("🖥️ Web Dashboard running on port 5000")
-    app.run(host='0.0.0.0', port=5000)
