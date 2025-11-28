@@ -40,22 +40,20 @@ BOT_SETTINGS = {
     "paper_trading_mode": True,
     "base_capital": 1000.0,       # رأس المال الافتراضي
     "risk_per_trade_pct": 2.0,    # المخاطرة لكل صفقة
-    "max_open_trades": 5,         # تقليل العدد للتركيز على الجودة
+    "max_open_trades": 6,         # أقصى عدد صفقات متزامنة
     "max_drawdown_protect": 10.0, # حماية من الانهيار
     "volume_lookback": 50,
-    "timeframe_analysis": "15m",  # فريم الدخول
+    "timeframe_analysis": "15m",
     "timeframe_trend": "1h"
 }
 
-# الرموز القيادية التي تحدد اتجاه السوق
 LEADING_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
 
 # حالة النظام
 system_state = {
-    "market_regime": "Neutral",   # Bull_Trend_Strong, Bull_Accumulation, Ranging, High_Volatility_Choppy, Bear_Trend
-    "trend_strength": 0,          # 0 to 100
+    "market_regime": "Neutral",   # Bull_Trend, Bear_Trend, Ranging, Volatile
+    "trend_strength": 0,
     "volatility_index": "Low",
-    "global_score": 0,            # مجموع نقاط قوة السوق
     "portfolio_value": BOT_SETTINGS['base_capital'],
     "last_update": None
 }
@@ -160,7 +158,6 @@ def calculate_technical_indicators(df):
     df = df.copy()
     # المتوسطات
     df['ema9'] = df['close'].ewm(span=9).mean()
-    df['ema20'] = df['close'].ewm(span=20).mean() # Bollinger Mid
     df['ema50'] = df['close'].ewm(span=50).mean()
     df['ema200'] = df['close'].ewm(span=200).mean()
     
@@ -196,9 +193,11 @@ def calculate_technical_indicators(df):
     df['adx'] = df['dx'].rolling(14).mean()
 
     # Bollinger Bands
-    df['bb_upper'] = df['ema20'] + (2 * df['close'].rolling(20).std())
-    df['bb_lower'] = df['ema20'] - (2 * df['close'].rolling(20).std())
-    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['ema20']
+    df['bb_mid'] = df['close'].rolling(20).mean()
+    std = df['close'].rolling(20).std()
+    df['bb_upper'] = df['bb_mid'] + (2*std)
+    df['bb_lower'] = df['bb_mid'] - (2*std)
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
 
     # Ichimoku Tenkan (Simplified)
     high_9 = df['high'].rolling(9).max()
@@ -208,189 +207,77 @@ def calculate_technical_indicators(df):
     df['vol_ma'] = df['volume'].rolling(20).mean()
     return df.fillna(0)
 
-# --- 6. محلل بيئة السوق المتطور (Advanced Market Regime) ---
+# --- 6. محلل بيئة السوق (Market Regime) ---
 def analyze_market_regime(client):
-    """
-    يقوم بتحليل السوق بناءً على الرموز القيادية في 3 فريمات زمنية:
-    - 4 ساعات: لتحديد الهيكل العام (Structure).
-    - 1 ساعة: لتحديد الاتجاه الحالي (Trend).
-    - 15 دقيقة: لتحديد الزخم (Momentum).
-    """
     global system_state
+    btc_df = fetch_data(client, 'BTCUSDT', '4h', 100)
+    if btc_df is None: return
+
+    btc_df = calculate_technical_indicators(btc_df)
+    last = btc_df.iloc[-1]
+
+    # تحديد الاتجاه
+    trend_score = 0
+    if last['close'] > last['ema200']: trend_score += 1
+    if last['ema50'] > last['ema200']: trend_score += 1
+    if last['macd'] > last['macd_signal']: trend_score += 1
     
-    total_score = 0
-    analyzed_count = 0
-    total_adx = 0
-    total_atr_pct = 0
+    adx = last['adx']
+    atr_pct = (last['atr'] / last['close']) * 100
     
-    # الفريمات المستخدمة
-    timeframes = ['4h', '1h', '15m']
-    tf_weights = {'4h': 0.5, '1h': 0.3, '15m': 0.2} # وزن أكبر للفريمات الكبيرة
-
-    for symbol in LEADING_SYMBOLS:
-        symbol_score = 0
-        try:
-            # جلب البيانات لكل الفريمات
-            klines_4h = fetch_data(client, symbol, '4h', 60)
-            klines_1h = fetch_data(client, symbol, '1h', 60)
-            klines_15m = fetch_data(client, symbol, '15m', 60)
-            
-            if klines_4h is None or klines_1h is None or klines_15m is None:
-                continue
-                
-            # حساب المؤشرات
-            df_4h = calculate_technical_indicators(klines_4h).iloc[-1]
-            df_1h = calculate_technical_indicators(klines_1h).iloc[-1]
-            df_15m = calculate_technical_indicators(klines_15m).iloc[-1]
-            
-            # --- 1. تحليل هيكل 4 ساعات (الوزن 50%) ---
-            score_4h = 0
-            if df_4h['close'] > df_4h['ema200']: score_4h += 1    # فوق المتوسط طويل الأمد
-            if df_4h['ema50'] > df_4h['ema200']: score_4h += 1    # ترتيب المتوسطات إيجابي
-            if df_4h['rsi'] > 50: score_4h += 0.5                 # قوة نسبية
-            # إذا كان السعر تحت المتوسطات، النقاط تصبح سلبية
-            if df_4h['close'] < df_4h['ema200']: score_4h -= 1
-            if df_4h['ema50'] < df_4h['ema200']: score_4h -= 1
-            
-            # --- 2. تحليل اتجاه 1 ساعة (الوزن 30%) ---
-            score_1h = 0
-            if df_1h['close'] > df_1h['ema50']: score_1h += 1
-            if df_1h['macd_hist'] > 0: score_1h += 1
-            if df_1h['close'] < df_1h['ema50']: score_1h -= 1
-            
-            # --- 3. تحليل زخم 15 دقيقة (الوزن 20%) ---
-            score_15m = 0
-            if df_15m['close'] > df_15m['ema20']: score_15m += 1 # فوق خط البولنجر الأوسط
-            if df_15m['adx'] > 25: score_15m += 0.5              # وجود زخم
-            if df_15m['close'] < df_15m['ema20']: score_15m -= 1
-
-            # حساب الدرجة النهائية للعملة
-            final_sym_score = (score_4h * tf_weights['4h']) + \
-                              (score_1h * tf_weights['1h']) + \
-                              (score_15m * tf_weights['15m'])
-            
-            total_score += final_sym_score
-            analyzed_count += 1
-            
-            # تجميع بيانات التذبذب وقوة الاتجاه
-            total_adx += df_1h['adx']
-            total_atr_pct += (df_1h['atr'] / df_1h['close']) * 100
-            
-        except Exception as e:
-            logger.error(f"Error analyzing {symbol}: {e}")
-
-    if analyzed_count == 0: return
-
-    # حساب المتوسطات العامة
-    avg_score = total_score / analyzed_count # Range approx -2.5 to +2.5
-    avg_adx = total_adx / analyzed_count
-    avg_atr_pct = total_atr_pct / analyzed_count
-    
-    # تحديد حالة السوق بناءً على النقاط المجمعة
     regime = "Neutral"
-    
-    if avg_score >= 1.5 and avg_adx > 25:
-        regime = "Bull_Trend_Strong"      # صعود قوي جداً ومتفق عليه
-    elif avg_score >= 0.5:
-        if avg_adx < 20:
-            regime = "Bull_Accumulation"  # صعود ضعيف أو تجميع
-        else:
-            regime = "Bull_Trend_Strong"  # صعود جيد
-    elif avg_score <= -1.0:
-        regime = "Bear_Trend_Strong"      # هبوط صريح
-    elif avg_atr_pct > 2.5:
-        regime = "High_Volatility_Choppy" # تذبذب عالي وخطير
-    else:
-        regime = "Ranging"                # حركة عرضية (بين -1 و 0.5)
+    if trend_score == 3 and adx > 25: regime = "Bull_Trend_Strong" # صاعد قوي
+    elif trend_score >= 2 and adx < 20: regime = "Bull_Accumulation" # تجميع صاعد
+    elif trend_score == 0 and adx > 25: regime = "Bear_Trend_Strong" # هابط قوي
+    elif atr_pct > 2.0: regime = "High_Volatility_Choppy" # متقلب جداً
+    else: regime = "Ranging" # عرضي
 
     with locks['market']:
         system_state['market_regime'] = regime
-        system_state['trend_strength'] = int(avg_adx)
-        system_state['global_score'] = round(avg_score, 2)
-        system_state['volatility_index'] = "High" if avg_atr_pct > 2.0 else "Normal"
+        system_state['trend_strength'] = int(adx)
+        system_state['volatility_index'] = "High" if atr_pct > 1.5 else "Normal"
         system_state['last_update'] = datetime.now()
     
-    logger.info(f"🧠 Market Analysis: {regime} | Score: {avg_score:.2f} | ADX: {int(avg_adx)}")
+    logger.info(f"🧠 حالة السوق: {regime} | القوة: {int(adx)}")
 
 # --- 7. مصنع الاستراتيجيات (Strategy Factory) ---
 def get_smart_signal(symbol, df, regime):
-    """
-    يختار الاستراتيجية المناسبة بناءً على حالة السوق التي تم تحديدها
-    من تحليل الرموز القيادية، مع تطبيق شروط الفريم الحالي (15 دقيقة).
-    """
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # --- فلتر السيولة الأساسي ---
-    vol_factor = 0.5
+    # فلتر السيولة المتكيف
+    vol_factor = 0.3 if "High_Volatility" in regime else 0.6
     if last['volume'] < last['vol_ma'] * vol_factor:
-        return None, "سيولة ضعيفة"
+        if not (last['close'] > last['bb_upper']): return None, "سيولة منخفضة"
 
-    # -----------------------------------------------------
-    # الحالة 1: سوق صاعد قوي (Bull_Trend_Strong)
-    # الاستراتيجية: Momentum Breakout (اختراق الزخم)
-    # -----------------------------------------------------
-    if regime == "Bull_Trend_Strong":
-        # شروط الاختراق:
-        # 1. السعر فوق جميع المتوسطات
-        # 2. MACD هستوجرام إيجابي ومتزايد
-        # 3. اختراق قمة الشمعة السابقة
-        if last['close'] > last['ema20'] and last['close'] > last['ema50']:
-            if last['macd_hist'] > 0 and last['macd_hist'] > prev['macd_hist']:
-                if last['close'] > prev['high']:
-                    return "Momentum_Breakout", "اختراق زخم مع الاتجاه العام"
+    # 1. استراتيجية سحابة الاتجاه (Ichimoku/Trend)
+    if "Bull_Trend" in regime:
+        if last['close'] > last['ema50'] and last['adx'] > 20:
+            # إعادة دخول مع التصحيح
+            if last['low'] <= last['tenkan_sen'] and last['close'] > last['tenkan_sen']:
+                 return "Trend_Pullback", "إعادة دخول (تصحيح)"
+            # اختراق
+            if last['close'] > prev['high'] and last['macd_hist'] > 0:
+                return "Momentum_Breakout", "اختراق زخم"
 
-    # -----------------------------------------------------
-    # الحالة 2: تجميع صاعد (Bull_Accumulation)
-    # الاستراتيجية: Trend Pullback (الشراء من الانخفاضات)
-    # -----------------------------------------------------
-    elif regime == "Bull_Accumulation":
-        # شروط التصحيح:
-        # 1. الاتجاه العام صاعد (فوق EMA200)
-        # 2. السعر يقوم بتصحيح نحو Tenkan Sen أو EMA50
-        # 3. شمعة خضراء تفلتر الدخول
-        if last['close'] > last['ema200']:
-            # السعر قريب من الدعم الديناميكي
-            dist_to_ema50 = abs(last['close'] - last['ema50']) / last['close'] * 100
-            if dist_to_ema50 < 1.5: # قريب جداً من المتوسط
-                if last['rsi'] < 55 and last['rsi'] > 40: # ليس في تشبع شرائي
-                    if last['close'] > last['open']: # شمعة تأكيد
-                        return "Trend_Pullback", "ارتداد من دعم (تجميع)"
+    # 2. استراتيجية القناص المرتد (للسوق العرضي)
+    elif "Ranging" in regime or "Accumulation" in regime:
+        if last['bb_width'] < 0.10: # انضغاط
+            if last['rsi'] < 40 and last['stoch_k'] < 20:
+                if last['close'] > prev['close']:
+                    return "Sniper_Reversion", "ارتداد من القاع (تشبع)"
 
-    # -----------------------------------------------------
-    # الحالة 3: سوق عرضي (Ranging)
-    # الاستراتيجية: Sniper Reversion (ارتداد من البولنجر)
-    # -----------------------------------------------------
-    elif regime == "Ranging":
-        # شروط الارتداد:
-        # 1. البولنجر باند ضيق (انضغاط)
-        # 2. RSI في مناطق تشبع بيعي
-        # 3. السعر يلمس الحد السفلي ثم يغلق فوقه
-        if last['bb_width'] < 0.15: # السوق هادئ
-            if last['rsi'] < 35: # تشبع بيعي
-                if last['low'] <= last['bb_lower'] and last['close'] > last['bb_lower']:
-                    return "Sniper_Reversion", "اقتناص قاع النطاق العرضي"
-
-    # -----------------------------------------------------
-    # الحالة 4: تذبذب عالي (High_Volatility)
-    # الاستراتيجية: Deep Value Scalp (خطف سريع للانحرافات)
-    # -----------------------------------------------------
+    # 3. استراتيجية خطف السيولة (للسوق المتقلب)
     elif "High_Volatility" in regime:
-        # انحراف سعري حاد عن المتوسط القصير (9)
-        dist_ema9 = (last['close'] - last['ema9']) / last['ema9'] * 100
-        if dist_ema9 < -4.0: # هبوط عنيف جداً بعيد عن المتوسط
-            if last['volume'] > last['vol_ma'] * 2: # ذروة بيع (Climax)
-                return "Deep_Value_Scalp", "ارتداد فني من ذروة البيع"
+        dist_ema = (last['close'] - last['ema9']) / last['ema9'] * 100
+        if dist_ema < -3.0 and last['rsi'] < 25:
+             return "Deep_Value_Scalp", "انحراف سعري حاد"
 
-    # -----------------------------------------------------
-    # الحالة 5: استراتيجية إضافية (التقاطع الذهبي)
-    # تعمل في الأسواق الصاعدة أو المحايدة
-    # -----------------------------------------------------
-    if regime in ["Bull_Trend_Strong", "Bull_Accumulation", "Neutral"]:
-        if last['ema50'] > last['ema200'] and prev['ema50'] <= prev['ema200']:
-             return "Golden_Cross", "تقاطع إيجابي للمتوسطات"
+    # 4. التقاطع الذهبي (شامل)
+    if last['ema50'] > last['ema200'] and prev['ema50'] <= prev['ema200']:
+         return "Golden_Cross", "تقاطع ذهبي طويل الأمد"
 
-    return None, "لا توجد إشارة"
+    return None, "لا توجد فرصة مناسبة"
 
 # --- 8. مدير المحفظة والمخاطر ---
 def manage_active_trade(symbol, signal, df):
@@ -408,42 +295,36 @@ def manage_active_trade(symbol, signal, df):
 
     # 1. جني الأرباح المرحلي
     if curr >= tp2:
-        # عند الوصول للهدف الثاني، نرفع الوقف للهدف الأول
         if sl < tp1: return "UPDATE_SL", tp1, "تأمين ربح الهدف الأول", "ربح ممتاز 🟢"
     elif curr >= tp1:
-        # عند الوصول للهدف الأول، نرفع الوقف لنقطة الدخول + قليل من الربح
         if sl < entry: return "UPDATE_SL", entry * 1.002, "صفقة خالية من المخاطر", "مؤمنة 🛡️"
 
     # 2. وقف الخسارة المتحرك (Trailing Stop)
-    # يتم تفعيله فقط إذا تجاوز الربح 1.5% والسوق صاعد
-    if profit_pct > 1.5 and "Bull" in signal['market_regime']:
+    if profit_pct > 2.0:
         atr_trail = curr - (last['atr'] * 2.0)
         if atr_trail > sl: return "UPDATE_SL", atr_trail, "ملاحقة الأرباح (ATR)", "منطلق 🏃"
 
     # 3. وقف الوقت (Time Stop)
-    # إذا مرت 4 ساعات (16 شمعة ربع ساعة) والسعر لم يتحرك
-    if duration > 4 and abs(profit_pct) < 0.6:
+    if duration > 6 and abs(profit_pct) < 0.5:
         return "CLOSE_NOW", curr, "تجميد رأس المال (خروج زمني)", "راكد ⚠️"
 
-    # 4. الخروج الفني المبكر
-    # إذا كسر السعر EMA50 بقوة في صفقة "Trend"
-    if "Trend" in signal['strategy'] and curr < last['ema50']:
-        if profit_pct < -0.5: # تأكيد السلبية
-             return "CLOSE_NOW", curr, "فشل الاتجاه (كسر EMA50)", "انعكاس 🔻"
+    # 4. الخروج الفني
+    if "Bull" in signal['market_regime'] and curr < last['ema50']:
+         return "CLOSE_NOW", curr, "كسر الاتجاه (EMA50)", "انعكاس 🔻"
 
     return "HOLD", 0, "", health_msg
 
 # --- 9. المحرك الرئيسي ---
 def bot_engine():
     client = Client(API_KEY, API_SECRET)
-    logger.info("🚀 SmartBot V13 Enhanced Engine Started")
+    logger.info("🚀 SmartBot V13 Engine Started")
     
     try:
         with open('crypto_list.txt') as f:
             symbols = [l.strip().upper() for l in f if l.strip()]
             symbols = [s if s.endswith('USDT') else s+'USDT' for s in symbols]
     except: 
-        symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'DOTUSDT', 'AVAXUSDT', 'LINKUSDT']
+        symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'DOTUSDT']
 
     while True:
         try:
@@ -456,16 +337,15 @@ def bot_engine():
                 time.sleep(5)
                 continue
 
-            # 1. تحليل السوق الشامل (تحديث كل دورة)
+            # 1. تحليل السوق
             analyze_market_regime(client)
             with locks['market']: regime = system_state['market_regime']
 
-            # 2. إدارة الصفقات المفتوحة
+            # 2. إدارة الصفقات
             with locks['signals']: active_trades = list(open_signals_cache.values())
             
             for trade in active_trades:
                 sym = trade['symbol']
-                # نراقب الصفقات المفتوحة على فريم 5 دقائق لسرعة التفاعل
                 df = fetch_data(client, sym, '5m', 60)
                 if df is None: continue
                 df = calculate_technical_indicators(df)
@@ -492,23 +372,21 @@ def bot_engine():
                 if exit_reason:
                     close_trade_final(sym, curr_price, exit_reason, paper)
 
-            # 3. البحث عن فرص جديدة
+            # 3. البحث عن فرص
             if len(open_signals_cache) < max_t:
                 tickers = client.get_ticker()
                 valid = [t for t in tickers if t['symbol'] in symbols]
-                # ترتيب العملات حسب الحجم والتغيير للعثور على العملات النشطة
                 valid.sort(key=lambda x: float(x['quoteVolume']) * abs(float(x['priceChangePercent'])), reverse=True)
                 
                 count = 0
                 for t in valid:
-                    if count > 15: break # فحص أفضل 15 عملة فقط لتسريع الدورة
+                    if count > 20: break
                     count += 1
                     
                     sym = t['symbol']
                     if sym in open_signals_cache: continue
                     
-                    # تحليل العملة على الفريم المحدد في الإعدادات (عادة 15m)
-                    df = fetch_data(client, sym, BOT_SETTINGS['timeframe_analysis'], 80)
+                    df = fetch_data(client, sym, BOT_SETTINGS['timeframe_analysis'], 100)
                     if df is None: continue
                     df = calculate_technical_indicators(df)
                     
@@ -518,29 +396,29 @@ def bot_engine():
                         curr = df['close'].iloc[-1]
                         atr = df['atr'].iloc[-1]
                         
-                        # إدارة المخاطر: الأهداف والوقف بناءً على ATR
+                        # تحديد الأهداف بناءً على المخاطرة
                         sl = curr - (atr * 2.0)
-                        tp1 = curr + (atr * 2.5) # R:R > 1.2
-                        tp2 = curr + (atr * 4.5) # R:R > 2.2
+                        tp1 = curr + (atr * 2.0)
+                        tp2 = curr + (atr * 4.0)
                         
-                        # حساب حجم الصفقة
+                        # تحديد الكمية بناءً على المخاطرة (2% من المحفظة)
                         risk_amt = BOT_SETTINGS['base_capital'] * (BOT_SETTINGS['risk_per_trade_pct'] / 100)
                         price_diff = curr - sl
                         qty = risk_amt / price_diff if price_diff > 0 else 0
                         
-                        if qty * curr > BOT_SETTINGS['base_capital'] * 0.25:
-                            qty = (BOT_SETTINGS['base_capital'] * 0.25) / curr
+                        # حماية من الكميات الضخمة (بحد أقصى 20% من المحفظة للصفقة)
+                        if qty * curr > BOT_SETTINGS['base_capital'] * 0.2:
+                            qty = (BOT_SETTINGS['base_capital'] * 0.2) / curr
                             
                         open_new_trade(sym, curr, sl, tp1, tp2, qty, strat, regime, paper)
                         time.sleep(1)
                     else:
-                        # تسجيل عمليات الفحص بشكل عشوائي لعدم ملء السجل
                         if random.random() < 0.05:
                              with locks['logs']: scan_logs.appendleft({'t': datetime.now().strftime('%H:%M'), 's': sym, 'st': 'فحص', 'r': reason})
                     
-                    time.sleep(0.1)
+                    time.sleep(0.2)
 
-            time.sleep(10) # انتظار قليل قبل الدورة التالية
+            time.sleep(15)
 
         except Exception as e:
             logger.error(f"Engine Error: {e}")
@@ -551,6 +429,7 @@ def open_new_trade(symbol, price, sl, tp1, tp2, qty, strat, regime, is_paper):
     check_db()
     try:
         mode = 'PAPER' if is_paper else 'REAL'
+        # تحويل الأرقام للتأكد (Fix np.float issue)
         price, sl, tp1, tp2, qty = float(price), float(sl), float(tp1), float(tp2), float(qty)
         
         with conn.cursor() as cur:
