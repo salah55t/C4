@@ -42,7 +42,7 @@ BOT_SETTINGS = {
     "base_capital": 1000.0,       
     "risk_per_trade_pct": 2.0,    
     "max_open_trades": 5,         
-    "min_usdt_volume": 10000000, # 10 مليون حجم
+    "min_usdt_volume": 10000000, 
     "timeframe_analysis": "1h",
     "atr_sl_mult": 1.5,
     "atr_tp_mult": 2.5
@@ -50,10 +50,10 @@ BOT_SETTINGS = {
 
 # --- إعدادات الأمان (الجوهرية لمنع الحظر) ---
 SAFETY_CONFIG = {
-    "MAX_WEIGHT_PER_MINUTE": 1000,  # نترك هامش أمان (الحد 1200)
-    "SLEEP_BETWEEN_SYMBOLS": 2.5,   # فاصل زمني إجباري بين فحص العملات
-    "SLEEP_ON_ERROR": 60,           # انتظار عند الخطأ العادي
-    "BAN_PROTECTION_SLEEP": 300     # انتظار 5 دقائق عند التحذير من الحظر
+    "MAX_WEIGHT_PER_MINUTE": 1000,  
+    "SLEEP_BETWEEN_SYMBOLS": 2.5,   
+    "SLEEP_ON_ERROR": 60,           
+    "BAN_PROTECTION_SLEEP": 300     
 }
 
 system_state = {
@@ -81,13 +81,10 @@ class RateLimitGuard:
     def check_limits(self, weight_cost=1):
         """فحص الحدود قبل تنفيذ الطلب"""
         now = datetime.now()
-        # تصفير العداد كل دقيقة
         if (now - self.last_reset).total_seconds() > 60:
             self.used_weight_1m = 0
             self.last_reset = now
-            # logger.info("♻️ API Weight Reset")
 
-        # إذا تجاوزنا الحد، نتوقف
         if self.used_weight_1m + weight_cost > SAFETY_CONFIG['MAX_WEIGHT_PER_MINUTE']:
             wait_time = 61 - (now - self.last_reset).total_seconds()
             wait_time = max(1, wait_time)
@@ -196,13 +193,10 @@ def send_telegram(event, payload):
 
 # --- 6. التحليل الفني الآمن (Safe Fetch) ---
 def safe_fetch_klines(client, symbol, interval, limit=100):
-    """جلب البيانات مع حماية هندسية من الحظر"""
     try:
-        # 1. فحص الوزن قبل الطلب
         with locks['api']:
-            rate_guard.check_limits(weight_cost=2) # كلفة الطلب تقريباً 2
+            rate_guard.check_limits(weight_cost=2)
         
-        # 2. الطلب المحمي
         klines = client.get_historical_klines(symbol, interval, limit=limit)
         
         if not klines: return None
@@ -236,13 +230,11 @@ def safe_fetch_klines(client, symbol, interval, limit=100):
         return df
 
     except BinanceAPIException as e:
-        # معالجة الخطأ -1003 بشكل خاص
         if e.code == -1003:
             logger.critical(f"⛔ تحذير حظر (Way too much weight)! دخول وضع السبات لمدة 5 دقائق...")
             time.sleep(SAFETY_CONFIG['BAN_PROTECTION_SLEEP'])
-            # بعد الاستيقاظ، تصفير العداد يدوياً
             with locks['api']: rate_guard.used_weight_1m = 0
-        elif e.code == -1021: # Timestamp drift
+        elif e.code == -1021:
              logger.warning("Timestamp sync issue.. retrying next loop")
         else:
             logger.error(f"API Error ({symbol}): {e}")
@@ -259,9 +251,8 @@ def analyze_market_leaders(client):
     
     logger.info("🔎 تحديث حالة السوق...")
     for sym in leaders:
-        # نستخدم safe_fetch_klines بدلاً من fetch_data
         df = safe_fetch_klines(client, sym, '4h', limit=50)
-        time.sleep(1) # تأخير بسيط بين القياديين
+        time.sleep(1) 
         
         if df is None: continue
         last = df.iloc[-1]
@@ -287,9 +278,7 @@ def analyze_market_leaders(client):
 
 def get_best_symbols(client):
     try:
-        # فحص الوزن قبل طلب التيكر (التيكر ثقيل نوعاً ما)
         with locks['api']: rate_guard.check_limits(weight_cost=20)
-        
         tickers = client.get_ticker()
         
         valid = []
@@ -303,7 +292,6 @@ def get_best_symbols(client):
             valid.append({'s': t['symbol'], 'sc': score})
             
         valid.sort(key=lambda x: x['sc'], reverse=True)
-        # نأخذ أفضل 30 فقط لتقليل الضغط
         return [x['s'] for x in valid[:30]]
     except Exception as e: 
         logger.error(f"Error fetching tickers: {e}")
@@ -316,14 +304,12 @@ def get_signal(symbol, df, regime):
     
     if regime == "Bear_Strong": return None, None
     
-    # 1. اختراق السحابة
     if "Bull" in regime:
         if last['close'] > last['span_a'] and last['close'] > last['span_b']:
             if last['close'] > last['ema50']:
                 if last['tenkan'] > last['kijun']:
                      return "BUY", "Cloud_Breakout_Trend"
     
-    # 2. ارتداد EMA
     if regime in ["Neutral", "Bull_Weak"]:
         dist = abs(last['close'] - last['ema50']) / last['close']
         if dist < 0.02 and last['close'] > last['ema50']:
@@ -362,7 +348,6 @@ def manage_trade(trade, curr_price, df):
 
 # --- 9. المحرك الرئيسي (مُحسّن) ---
 def bot_engine():
-    # محاولة الاتصال الأولية
     while True:
         try:
             client = Client(API_KEY, API_SECRET)
@@ -390,12 +375,10 @@ def bot_engine():
                 time.sleep(10)
                 continue
 
-            # تحديث حالة السوق
-            if (now - last_market_check).total_seconds() > 900: # كل 15 دقيقة
+            if (now - last_market_check).total_seconds() > 900: 
                 analyze_market_leaders(client)
                 last_market_check = now
             
-            # تحديث قائمة العملات
             if (now - last_scan_list).total_seconds() > 3600 or not active_symbols:
                 active_symbols = get_best_symbols(client)
                 logger.info(f"📋 القائمة النشطة: {len(active_symbols)} رمز")
@@ -403,7 +386,6 @@ def bot_engine():
 
             with locks['market']: regime = system_state['market_regime']
             
-            # --- إدارة الصفقات المفتوحة ---
             with locks['signals']: trades = list(open_signals_cache.values())
             
             for t in trades:
@@ -418,19 +400,20 @@ def bot_engine():
                 if action == "CLOSE":
                     close_trade_db(t['id'], t['symbol'], curr, reason)
                 elif action == "UPDATE":
+                    # 🔥 FIX: ضمان التحويل إلى float قبل التحديث
+                    val = float(val)
                     t['stop_loss'] = val
-                    t['highest_price'] = max(t.get('highest_price', 0), curr)
+                    t['highest_price'] = float(max(t.get('highest_price', 0), curr))
+                    
                     check_db()
                     with conn.cursor() as cur:
                         cur.execute("UPDATE trades_v14 SET stop_loss=%s, highest_price=%s WHERE id=%s", (val, t['highest_price'], t['id']))
                     send_telegram("UPDATE", {"symbol": t['symbol'], "new_sl": val, "reason": reason})
 
-                time.sleep(1) # فاصل زمني للصفقات
+                time.sleep(1)
 
-            # --- البحث (Scanning) مع الحماية ---
             if len(trades) < max_trades:
                 for sym in active_symbols:
-                    # التحقق مرة أخرى
                     with locks['signals']:
                         if len(open_signals_cache) >= max_trades: break
                         if sym in open_signals_cache: continue
@@ -452,20 +435,26 @@ def bot_engine():
                             
                             open_trade_db(sym, price, sl, tp1, tp2, qty, strat, regime, is_paper)
                     
-                    # --- النقطة الجوهرية: تأخير لمنع الحظر ---
                     time.sleep(SAFETY_CONFIG['SLEEP_BETWEEN_SYMBOLS'])
             
-            # استراحة طويلة بعد الدورة الكاملة
             time.sleep(10)
 
         except Exception as e:
             logger.error(f"Engine Loop Error: {e}")
             time.sleep(5)
 
-# --- 10. عمليات قاعدة البيانات ---
+# --- 10. عمليات قاعدة البيانات (تم الإصلاح هنا) ---
 def open_trade_db(symbol, price, sl, tp1, tp2, qty, strat, regime, is_paper):
     check_db()
     try:
+        # 🔥 FIX: تحويل كل متغيرات NumPy إلى Python native floats
+        # هذا يمنع خطأ "schema np does not exist"
+        price = float(price)
+        sl = float(sl)
+        tp1 = float(tp1)
+        tp2 = float(tp2)
+        qty = float(qty)
+        
         mode = 'PAPER' if is_paper else 'REAL'
         with conn.cursor() as cur:
             cur.execute("""
@@ -497,8 +486,13 @@ def close_trade_db(tid, symbol, price, reason):
         
         if not trade: return
         
-        profit_pct = ((price - trade['entry_price']) / trade['entry_price']) * 100
-        profit_abs = (price - trade['entry_price']) * trade['quantity']
+        # 🔥 FIX: تحويل القيم المحسوبة إلى float عادي
+        price = float(price)
+        entry_price = float(trade['entry_price'])
+        quantity = float(trade['quantity'])
+        
+        profit_pct = float(((price - entry_price) / entry_price) * 100)
+        profit_abs = float((price - entry_price) * quantity)
         dur = int((datetime.now() - trade['entry_time']).total_seconds() / 60)
 
         with conn.cursor() as cur:
