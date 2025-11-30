@@ -40,14 +40,14 @@ BOT_SETTINGS = {
     "paper_trading_mode": True,
     "base_capital": 1000.0,       # رأس المال الافتراضي
     "risk_per_trade_pct": 2.0,    # المخاطرة لكل صفقة
-    "max_open_trades": 5,         # تقليل العدد قليلاً لزيادة التركيز على الجودة
-    "max_drawdown_protect": 10.0, # حماية من الانهيار
+    "max_open_trades": 5,         
+    "max_drawdown_protect": 10.0, 
     "volume_lookback": 50,
-    "timeframe_analysis": "15m",  # الإطار الزمني للتحليل
-    "timeframe_trend": "4h"       # لتحديد اتجاه السحابة
+    "timeframe_analysis": "15m",  
+    "timeframe_trend": "4h"       
 }
 
-# سيتم تحديث القائمة ديناميكياً بناءً على الحجم
+# سيتم تحديث القائمة ديناميكياً
 LEADING_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
 
 # حالة النظام
@@ -97,7 +97,7 @@ def init_db():
                     exit_reason TEXT
                 );
             """)
-        logger.info("✅ قاعدة البيانات جاهزة (V13 - Elliott & Ichimoku).")
+        logger.info("✅ قاعدة البيانات جاهزة (V13 - Candlestick Enhanced).")
     except Exception as e: logger.error(f"خطأ قاعدة البيانات: {e}")
 
 def check_db():
@@ -113,13 +113,14 @@ def send_telegram(event, payload):
 
     if event == "BUY":
         msg = (
-            f"🚀 *إشارة دخول (موجات + إيشيموكو) | {payload['symbol']}*\n"
+            f"🚀 *إشارة دخول مؤكدة | {payload['symbol']}*\n"
             f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
-            f"🌊 الموجة: `{payload['strategy']}`\n"
+            f"🌊 الاستراتيجية: `{payload['strategy']}`\n"
+            f"🕯️ الشمعة: `{payload.get('candle_pattern', 'Generic')}`\n"
             f"☁️ السحابة: {payload['regime']}\n"
             f"💵 السعر: `{payload['price']}`\n"
             f"🛑 الوقف: `{payload['sl']}`\n"
-            f"🎯 الأهداف: `{payload['tp1']}` ➔ `{payload['tp2']}`\n"
+            f"🎯 هدف أول: `{payload['tp1']}`\n"
             f"🕹️ الوضع: {mode_icon}"
         )
     elif event == "SELL":
@@ -145,8 +146,8 @@ def send_telegram(event, payload):
                       data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
     except: pass
 
-# --- 5. محرك التحليل الفني (Ichimoku & Elliott) ---
-def fetch_data(client, symbol, interval, limit=130): # زيادة الحد لحساب السحابة بشكل صحيح
+# --- 5. محرك التحليل الفني (Ichimoku & Elliott + Candles) ---
+def fetch_data(client, symbol, interval, limit=130): 
     try:
         klines = client.get_historical_klines(symbol, interval, limit=limit)
         if not klines: return None
@@ -159,45 +160,37 @@ def calculate_technical_indicators(df):
     df = df.copy()
     
     # 1. Ichimoku Cloud (Full)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
     high_9 = df['high'].rolling(window=9).max()
     low_9 = df['low'].rolling(window=9).min()
     df['tenkan_sen'] = (high_9 + low_9) / 2
 
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
     high_26 = df['high'].rolling(window=26).max()
     low_26 = df['low'].rolling(window=26).min()
     df['kijun_sen'] = (high_26 + low_26) / 2
 
-    # Senkou Span A (Leading Span A): (Conversion Line + Base Line) / 2
     df['senkou_span_a'] = ((df['tenkan_sen'] + df['kijun_sen']) / 2).shift(26)
 
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
     high_52 = df['high'].rolling(window=52).max()
     low_52 = df['low'].rolling(window=52).min()
     df['senkou_span_b'] = ((high_52 + low_52) / 2).shift(26)
-
-    # Chikou Span (Lagging Span): Close shifted back 26 periods
     df['chikou_span'] = df['close'].shift(-26)
 
     # 2. Elliott Wave Helper (Awesome Oscillator - AO)
-    # AO = SMA(Median Price, 5) - SMA(Median Price, 34)
     median_price = (df['high'] + df['low']) / 2
     df['ao'] = median_price.rolling(5).mean() - median_price.rolling(34).mean()
     df['ao_prev'] = df['ao'].shift(1)
 
-    # 3. Standard Indicators for Confirmation
+    # 3. Standard Indicators
     df['ema50'] = df['close'].ewm(span=50).mean()
     df['ema200'] = df['close'].ewm(span=200).mean()
     
-    # RSI
+    # RSI & ATR
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # ATR for Stop Loss
     df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
     df['atr'] = df['tr'].rolling(14).mean()
 
@@ -205,87 +198,136 @@ def calculate_technical_indicators(df):
     
     return df
 
+# --- 5.1 تحليل الشموع اليابانية (جديد) ---
+def detect_bullish_pattern(df):
+    """
+    دالة للكشف عن أنماط الشموع الصعودية في آخر شمعة مكتملة
+    Returns: (is_bullish, pattern_name)
+    """
+    try:
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        prev2 = df.iloc[-3]
+        
+        # حساب جسم الشمعة والظلال
+        body = abs(curr['close'] - curr['open'])
+        upper_wick = curr['high'] - max(curr['close'], curr['open'])
+        lower_wick = min(curr['close'], curr['open']) - curr['low']
+        is_green = curr['close'] > curr['open']
+        
+        # 1. الابتلاع الشرائي (Bullish Engulfing)
+        # شمعة سابقة حمراء، شمعة حالية خضراء تبتلع جسم السابقة بالكامل
+        if (prev['close'] < prev['open']) and is_green:
+            if (curr['open'] < prev['close']) and (curr['close'] > prev['open']):
+                return True, "Bullish Engulfing (ابتلاع شرائي)"
+
+        # 2. المطرقة (Hammer)
+        # ظل سفلي طويل (ضعف الجسم على الأقل) وظل علوي صغير جداً
+        if lower_wick >= (body * 2) and upper_wick <= (body * 0.5):
+            # يفضل أن تكون خضراء أو حمراء في قاع
+            return True, "Hammer (مطرقة)"
+
+        # 3. خط الثقب (Piercing Line)
+        # شمعة حمراء قوية ثم خضراء تفتح بفجوة هابطة وتغلق فوق منتصف الحمراء
+        if (prev['close'] < prev['open']) and is_green:
+            mid_point = prev['open'] - (abs(prev['open'] - prev['close']) / 2)
+            if (curr['open'] < prev['low']) and (curr['close'] > mid_point):
+                return True, "Piercing Line (خط الثقب)"
+
+        # 4. ثلاثة جنود بيض (Three White Soldiers)
+        # ثلاث شموع خضراء متتالية، كل واحدة تغلق أعلى من السابقة
+        if (curr['close'] > curr['open']) and (prev['close'] > prev['open']) and (prev2['close'] > prev2['open']):
+            if (curr['close'] > prev['close']) and (prev['close'] > prev2['close']):
+                # تأكد أن الذيول العلوية ليست طويلة جداً
+                if upper_wick < body: 
+                    return True, "3 White Soldiers (جنود بيض)"
+
+        # 5. شمعة زخم قوية (Strong Momentum Candle)
+        # شمعة خضراء كبيرة تغلق قريباً جداً من الهاي (Marubozu-like)
+        avg_body = abs(df['close'] - df['open']).rolling(10).mean().iloc[-1]
+        if is_green and (body > avg_body * 1.5):
+            if (curr['close'] - curr['low']) > (curr['high'] - curr['low']) * 0.85: # إغلاق في الربع العلوي
+                return True, "Strong Momentum (زخم قوي)"
+
+        return False, None
+    except:
+        return False, None
+
 # --- 6. محلل بيئة السوق (Market Regime) ---
 def analyze_market_regime(client):
     global system_state
-    # نستخدم البتكوين كمؤشر عام للسوق
     btc_df = fetch_data(client, 'BTCUSDT', '4h', 150)
     if btc_df is None: return
 
     btc_df = calculate_technical_indicators(btc_df)
     last = btc_df.iloc[-1]
 
-    # حالة سحابة الإيشيموكو
     cloud_status = "Neutral"
     if last['close'] > last['senkou_span_a'] and last['close'] > last['senkou_span_b']:
-        cloud_status = "Bull_Cloud" # السعر فوق السحابة
+        cloud_status = "Bull_Cloud" 
     elif last['close'] < last['senkou_span_a'] and last['close'] < last['senkou_span_b']:
-        cloud_status = "Bear_Cloud" # السعر تحت السحابة
+        cloud_status = "Bear_Cloud" 
     else:
-        cloud_status = "In_Cloud_Turbulence" # السعر داخل السحابة (تذبذب)
+        cloud_status = "In_Cloud_Turbulence" 
 
-    # قوة الاتجاه باستخدام AO
     trend_strength = 0
-    if last['ao'] > 0 and last['ao'] > last['ao_prev']: trend_strength = 1 # زخم إيجابي متزايد
-    elif last['ao'] < 0 and last['ao'] < last['ao_prev']: trend_strength = -1 # زخم سلبي متزايد
+    if last['ao'] > 0 and last['ao'] > last['ao_prev']: trend_strength = 1 
+    elif last['ao'] < 0 and last['ao'] < last['ao_prev']: trend_strength = -1 
 
     regime = cloud_status
     
     with locks['market']:
         system_state['market_regime'] = regime
         system_state['trend_strength'] = trend_strength
-        system_state['volatility_index'] = "Normal" # يمكن تطويره
+        system_state['volatility_index'] = "Normal" 
         system_state['last_update'] = datetime.now()
     
-    logger.info(f"🧠 حالة السوق (إليوت/إيشيموكو): {regime} | زخم AO: {trend_strength}")
+    logger.info(f"🧠 حالة السوق: {regime} | AO: {trend_strength}")
 
-# --- 7. مصنع الاستراتيجيات (Ichimoku & Elliott Logic) ---
+# --- 7. مصنع الاستراتيجيات (Ichimoku & Elliott + Candle Confirmation) ---
 def get_smart_signal(symbol, df, regime):
-    # نأخذ آخر شمعتين للتأكد من الإغلاق
-    if len(df) < 52: return None, "بيانات غير كافية"
+    if len(df) < 52: return None, "بيانات غير كافية", None
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # تجاهل العملات ذات السيولة الضعيفة
+    # 1. فلتر السيولة
     if last['volume'] < last['vol_ma'] * 0.5:
-        return None, "سيولة ضعيفة"
+        return None, "سيولة ضعيفة", None
 
-    # --- شروط الإيشيموكو الأساسية للدخول في صفقة شراء ---
-    # 1. السعر يجب أن يكون فوق السحابة (أو يخترقها للأعلى)
+    # 2. فحص أنماط الشموع (الفلتر الجديد)
+    is_candle_valid, candle_pattern = detect_bullish_pattern(df)
+    
+    # إذا لم توجد شمعة تأكيد، لا تكمل التحليل (إلا في حالات خاصة جداً)
+    if not is_candle_valid:
+        return None, "انتظار تأكيد شمعة صاعدة", None
+
+    # شروط الإيشيموكو الأساسية
     above_cloud = (last['close'] > last['senkou_span_a']) and (last['close'] > last['senkou_span_b'])
+    tk_cross = (last['tenkan_sen'] >= last['kijun_sen']) # السماح بالتلامس أو التقاطع
     
-    # 2. Tenkan-sen (الخط السريع) فوق Kijun-sen (الخط البطيء) أو يقطعه للأعلى
-    tk_cross = (last['tenkan_sen'] > last['kijun_sen'])
-    
-    # 3. Chikou Span (الخط المتأخر) يجب أن يكون "حراً" (فوق السعر قبل 26 شمعة)
-    # ملاحظة: في البيانات الحية، chikou هو السعر الحالي مقارنة بالسعر قبل 26 فترة
-    chikou_free = True # سنفترض صحته في الكود المبسط، أو يمكن التحقق: last['close'] > df['high'].iloc[-27]
-    
-    # --- استراتيجيات دمج الموجات ---
+    # --- الاستراتيجيات ---
 
-    # استراتيجية 1: موجة 3 الاندفاعية (Elliott Wave 3 Breakout)
-    # المنطق: السعر فوق السحابة + AO إيجابي ومتزايد + اختراق قمة سابقة
-    if above_cloud and tk_cross and last['ao'] > 0 and last['ao'] > prev['ao']:
-        # اختراق Kumo (سحابة) قوي
-        if prev['close'] < prev['senkou_span_b'] and last['close'] > last['senkou_span_b']:
-             return "Elliott_Wave_3_Breakout", "اختراق السحابة + بداية موجة 3"
-        
-        # استمرار الاتجاه القوي
-        if last['close'] > last['ema50'] and last['rsi'] > 50 and last['rsi'] < 70:
-            return "Trend_Following_Wave3", "زخم إيجابي فوق السحابة"
+    # أ) استراتيجية موجة 3 (Elliott Wave 3 Breakout)
+    if above_cloud and tk_cross and last['ao'] > 0:
+        if last['ao'] > last['ao_prev']: # تسارع الزخم
+            if last['close'] > prev['high']: # تأكيد حركة السعر
+                return "Elliott_Wave_3", "اختراق موجة 3 + " + candle_pattern, candle_pattern
 
-    # استراتيجية 2: انتهاء الموجة 4 (Elliott Wave 4 Pullback)
-    # المنطق: السعر فوق السحابة، لكنه صحح وهبط ليلمس Kijun-sen ثم ارتد
-    # الموجة 4 عادة لا تتداخل مع الموجة 1، وغالباً ما تجد دعماً عند Kijun أو سقف السحابة
+    # ب) استراتيجية ارتداد موجة 4 (Elliott Wave 4 Pullback)
+    # الارتداد من Kijun Sen أو سقف السحابة
     if above_cloud:
-        # السعر قريب جداً من Kijun (ارتداد)
+        # السعر لامس Kijun وارتد
         dist_to_kijun = abs(last['low'] - last['kijun_sen']) / last['close']
-        if dist_to_kijun < 0.015 and last['close'] > last['open']: # شمعة خضراء مرتدة
-            if last['ao'] > 0: # لا يزال الزخم العام إيجابياً (تصحيح بسيط)
-                return "Elliott_Wave_4_Bounce", "ارتداد من Kijun (انتهاء تصحيح)"
+        if dist_to_kijun < 0.02 and last['close'] > last['kijun_sen']:
+             # هنا الشمعة (مثل المطرقة) ضرورية جداً
+             return "Elliott_Wave_4_Bounce", "ارتداد Kijun + " + candle_pattern, candle_pattern
 
-    return None, "لا توجد فرصة"
+    # ج) تقاطع TK قوي فوق السحابة (Strong TK Cross)
+    if above_cloud and (prev['tenkan_sen'] <= prev['kijun_sen']) and (last['tenkan_sen'] > last['kijun_sen']):
+        return "Ichimoku_TK_Cross", "تقاطع TK ذهبي + " + candle_pattern, candle_pattern
+
+    return None, "لا توجد فرصة مؤكدة", None
 
 # --- 8. مدير المحفظة والمخاطر ---
 def manage_active_trade(symbol, signal, df):
@@ -295,51 +337,45 @@ def manage_active_trade(symbol, signal, df):
     tp1 = float(signal['tp1'])
     tp2 = float(signal['tp2'])
     sl = float(signal['stop_loss'])
-    
-    # استخدام Kijun-sen كوقف خسارة متحرك (Trailing Stop)
     kijun = last['kijun_sen']
     
     profit_pct = (curr - entry) / entry * 100
     duration = (datetime.now() - signal['entry_time']).total_seconds() / 3600
 
-    # 1. جني الأرباح
+    # جني الأرباح
     if curr >= tp2:
         return "UPDATE_SL", tp1, "تأمين ربح الهدف الأول", "ربح ممتاز 🟢"
     elif curr >= tp1:
         if sl < entry: return "UPDATE_SL", entry * 1.002, "Breakeven", "مؤمنة 🛡️"
 
-    # 2. وقف الخسارة المتحرك الذكي (Ichimoku Trailing)
-    # إذا كان السعر بعيداً عن الدخول بربح جيد، نرفع الوقف ليكون تحت Kijun-sen
+    # وقف الخسارة المتحرك (Ichimoku Trailing)
     if profit_pct > 3.0:
-        new_sl = kijun * 0.99 # تحت الكيجون بـ 1%
+        new_sl = kijun * 0.99
         if new_sl > sl:
              return "UPDATE_SL", new_sl, "Trailing Stop (Kijun)", "ملاحقة Kijun"
 
-    # 3. الخروج الفني (عكس الاتجاه)
-    # إذا كسر السعر السحابة للأسفل (إغلاق تحت Senkou B)
+    # الخروج الفني (كسر السحابة)
     if curr < last['senkou_span_b'] and curr < last['senkou_span_a']:
-         return "CLOSE_NOW", curr, "كسر السحابة للأسفل (انعكاس)", "خطر ⚠️"
+         return "CLOSE_NOW", curr, "كسر السحابة للأسفل", "خطر ⚠️"
 
-    # 4. وقف الوقت
+    # وقف الوقت
     if duration > 12 and profit_pct < 1.0:
-         return "CLOSE_NOW", curr, "بطء الحركة (Time Stop)", "راكد"
+         return "CLOSE_NOW", curr, "Time Stop", "راكد"
 
     return "HOLD", 0, "", "مستمر"
 
 # --- 9. المحرك الرئيسي ---
 def bot_engine():
     client = Client(API_KEY, API_SECRET)
-    logger.info("🚀 SmartBot V13 (Elliott & Ichimoku) Started")
+    logger.info("🚀 SmartBot V13 (Elliott + Ichimoku + Candles) Started")
     
     try:
-        # محاولة تحميل قائمة العملات أو استخدام القائمة الافتراضية
         symbols = LEADING_SYMBOLS
         try:
             tickers = client.get_ticker()
-            # ترتيب حسب الحجم (Volume * Price) لاختيار أفضل 20 عملة
             valid = [t for t in tickers if t['symbol'].endswith('USDT')]
             valid.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
-            symbols = [x['symbol'] for x in valid[:25]] # أفضل 25 عملة سيولة
+            symbols = [x['symbol'] for x in valid[:25]] 
             logger.info(f"✅ تم تحميل {len(symbols)} عملة للتحليل")
         except Exception as e:
             logger.warning(f"⚠️ استخدام القائمة الاحتياطية: {e}")
@@ -359,22 +395,17 @@ def bot_engine():
                 time.sleep(10)
                 continue
 
-            # 1. تحليل السوق العام (على البتكوين)
             analyze_market_regime(client)
             with locks['market']: regime = system_state['market_regime']
             
-            # تجنب التداول إذا كان السوق داخل السحابة (تذبذب)
+            # السماح بالتداول فقط إذا لم يكن السوق في حالة انهيار شديد
             trading_allowed = True
-            if regime == "In_Cloud_Turbulence":
-                # يمكن السماح بالتداول ولكن بحذر، أو إيقافه. هنا سنسمح به ولكن بحذر.
-                pass 
-
-            # 2. إدارة الصفقات المفتوحة
+            
+            # إدارة الصفقات
             with locks['signals']: active_trades = list(open_signals_cache.values())
             
             for trade in active_trades:
                 sym = trade['symbol']
-                # نستخدم 1h لإدارة الصفقة لتقليل الضوضاء
                 df = fetch_data(client, sym, '1h', 60)
                 if df is None: continue
                 df = calculate_technical_indicators(df)
@@ -400,19 +431,15 @@ def bot_engine():
                 
                 if exit_reason:
                     close_trade_final(sym, curr_price, exit_reason, paper)
-                
-                # انتظار صغير لعدم إرهاق الـ API
                 time.sleep(0.5)
 
-            # 3. البحث عن فرص جديدة (Scanning)
+            # البحث (Scanning)
             if len(open_signals_cache) < max_t and trading_allowed:
                 for sym in symbols:
-                    # إذا وصلنا للحد الأقصى نتوقف عن البحث
                     with locks['signals']: 
                         if len(open_signals_cache) >= max_t: break
                         if sym in open_signals_cache: continue
                     
-                    # جلب البيانات (1h للإشارات القوية المتوافقة مع الإيشيموكو)
                     df = fetch_data(client, sym, BOT_SETTINGS['timeframe_analysis'], 100)
                     if df is None: 
                         time.sleep(0.2)
@@ -420,47 +447,36 @@ def bot_engine():
                         
                     df = calculate_technical_indicators(df)
                     
-                    strat, reason = get_smart_signal(sym, df, regime)
+                    # استدعاء الدالة المحدثة التي ترجع 3 قيم
+                    strat, reason, candle_pat = get_smart_signal(sym, df, regime)
                     
                     if strat:
                         curr = df['close'].iloc[-1]
                         atr = df['atr'].iloc[-1]
                         
-                        # تحديد الأهداف والوقف بناءً على ATR والسحابة
-                        # الوقف يكون تحت Senkou B أو Kijun
                         support_level = min(df['senkou_span_a'].iloc[-1], df['senkou_span_b'].iloc[-1], df['kijun_sen'].iloc[-1])
-                        
-                        # تأكد أن الوقف ليس بعيداً جداً (Max 4% مثلاً)
                         sl = min(support_level, curr - (atr * 1.5))
-                        if (curr - sl) / curr > 0.05: # إذا الوقف بعيد أكثر من 5%
-                             sl = curr * 0.95 # اجعله 5% فقط
                         
-                        risk_reward_ratio = 2.0
+                        if (curr - sl) / curr > 0.05: sl = curr * 0.95
+                        
                         risk = curr - sl
                         tp1 = curr + (risk * 1.5)
                         tp2 = curr + (risk * 3.0)
                         
-                        # إدارة رأس المال
                         risk_amt = BOT_SETTINGS['base_capital'] * (BOT_SETTINGS['risk_per_trade_pct'] / 100)
                         qty = risk_amt / risk if risk > 0 else 0
                         
-                        # تحقق من الحد الأقصى لحجم الصفقة
                         if qty * curr > BOT_SETTINGS['base_capital'] * 0.25:
                             qty = (BOT_SETTINGS['base_capital'] * 0.25) / curr
                             
-                        open_new_trade(sym, curr, sl, tp1, tp2, qty, strat, regime, paper)
-                        time.sleep(1) # انتظار بعد فتح صفقة
+                        open_new_trade(sym, curr, sl, tp1, tp2, qty, strat, regime, paper, candle_pat)
+                        time.sleep(1) 
                     else:
-                        # تسجيل بسيط في اللوج العشوائي للواجهة
                         if random.random() < 0.02:
                              with locks['logs']: scan_logs.appendleft({'t': datetime.now().strftime('%H:%M'), 's': sym, 'st': 'فحص', 'r': reason})
                     
-                    # **هام جداً**: تأخير لتجنب الحظر (Rate Limiting)
-                    # Binance يسمح بـ 1200 وزن في الدقيقة. كل طلب klines يأخذ وزناً.
-                    # 0.5 ثانية انتظار بين كل عملة يعني 120 طلب في الدقيقة، وهو آمن جداً.
                     time.sleep(0.8) 
 
-            # انتظار قبل الدورة التالية
             logger.info("💤 انتهاء دورة البحث، انتظار 20 ثانية...")
             time.sleep(20)
 
@@ -468,31 +484,35 @@ def bot_engine():
             logger.error(f"Engine Error: {e}")
             time.sleep(10)
 
-# --- 10. أدوات قاعدة البيانات (نفس الهيكل السابق) ---
-def open_new_trade(symbol, price, sl, tp1, tp2, qty, strat, regime, is_paper):
+# --- 10. أدوات قاعدة البيانات ---
+def open_new_trade(symbol, price, sl, tp1, tp2, qty, strat, regime, is_paper, candle_pat="None"):
     check_db()
     try:
         mode = 'PAPER' if is_paper else 'REAL'
         price, sl, tp1, tp2, qty = float(price), float(sl), float(tp1), float(tp2), float(qty)
         
+        # إضافة اسم الشمعة للاستراتيجية للتخزين
+        full_strat_name = f"{strat} | {candle_pat}"
+
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO trades_v13 
                 (symbol, entry_price, stop_loss, tp1, tp2, quantity, strategy_name, market_regime, status, mode, entry_time)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'open', %s, NOW())
                 RETURNING id
-            """, (symbol, price, sl, tp1, tp2, qty, strat, regime, mode))
+            """, (symbol, price, sl, tp1, tp2, qty, full_strat_name, regime, mode))
             db_id = cur.fetchone()['id']
         
         trade = {
             'id': db_id, 'symbol': symbol, 'entry_price': price, 'stop_loss': sl,
             'tp1': tp1, 'tp2': tp2, 'quantity': qty, 'entry_time': datetime.now(),
-            'strategy': strat, 'market_regime': regime, 'is_paper': is_paper
+            'strategy': strat, 'market_regime': regime, 'is_paper': is_paper,
+            'candle_pattern': candle_pat
         }
         
         with locks['signals']: open_signals_cache[symbol] = trade
         with locks['logs']: scan_logs.appendleft({'t': datetime.now().strftime('%H:%M'), 's': symbol, 'st': 'دخول', 'r': strat})
-        send_telegram("BUY", {**trade, 'price': price, 'sl': sl})
+        send_telegram("BUY", trade) # تم تمرير trade كاملة بما فيها candle_pattern
         
     except Exception as e: logger.error(f"DB Insert Error: {e}")
 
@@ -565,14 +585,14 @@ def toggle():
     with locks['settings']: BOT_SETTINGS['is_trading_enabled'] = not BOT_SETTINGS['is_trading_enabled']
     return jsonify("OK")
 
-# HTML Dashboard (نفس الواجهة مع تعديل بسيط للترجمة)
+# HTML Dashboard (نفس الواجهة)
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SmartBot V13 - Elliott & Ichimoku</title>
+    <title>SmartBot V13 - Candle Confirmation</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;900&display=swap" rel="stylesheet">
     <style>
@@ -603,8 +623,8 @@ DASHBOARD_HTML = """
 <body>
     <div class="header">
         <div>
-            <h1 style="margin:0; font-size:24px">SmartBot <span style="color:var(--accent)">V13 Elliott</span></h1>
-            <span style="font-size:12px; color:#848e9c">نظام إدارة المحفظة (إليوت + إيشيموكو)</span>
+            <h1 style="margin:0; font-size:24px">SmartBot <span style="color:var(--accent)">V13 Candles</span></h1>
+            <span style="font-size:12px; color:#848e9c">نظام إدارة المحفظة (إليوت + إيشيموكو + شموع)</span>
         </div>
         <div style="display:flex; gap:15px; align-items:center">
             <div style="text-align:left; margin-left:15px">
@@ -698,9 +718,9 @@ DASHBOARD_HTML = """
             "Neutral": "محايد ⚖️"
         };
         const stratMap = {
-            "Elliott_Wave_3_Breakout": "اختراق موجة 3 🚀",
-            "Trend_Following_Wave3": "تتبع الاتجاه (موجة 3)",
-            "Elliott_Wave_4_Bounce": "ارتداد موجة 4 🛡️"
+            "Elliott_Wave_3": "اختراق موجة 3 🚀",
+            "Elliott_Wave_4_Bounce": "ارتداد موجة 4 🛡️",
+            "Ichimoku_TK_Cross": "تقاطع TK ذهبي ✨"
         };
 
         function initCharts() {
