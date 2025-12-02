@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('SmartBot_Pro')
 
-# تحميل المتغيرات البيئية (يفضل وضعها في ملف .env)
+# تحميل المتغيرات البيئية
 try:
     API_KEY = config('BINANCE_API_KEY')
     API_SECRET = config('BINANCE_API_SECRET')
@@ -32,7 +32,6 @@ try:
     TELEGRAM_TOKEN = config('TELEGRAM_BOT_TOKEN', default='')
     TELEGRAM_CHAT_ID = config('TELEGRAM_CHAT_ID', default='')
 except Exception as e:
-    # قيم افتراضية للتجربة في حالة عدم وجود ملف .env
     API_KEY = ""
     API_SECRET = ""
     DB_URL = "postgresql://user:password@localhost/dbname" 
@@ -42,19 +41,19 @@ except Exception as e:
 BOT_SETTINGS = {
     "is_trading_enabled": False,
     "paper_trading_mode": True,
-    "base_capital": 1000.0,       # رأس المال
-    "risk_per_trade_pct": 2.0,    # المخاطرة لكل صفقة
-    "max_open_trades": 5,         # عدد الصفقات المتزامنة (تم تقليله لزيادة التركيز)
-    "fib_lookback": 144,          # فترة البحث عن قمم وقيعان فيبوناتشي
+    "base_capital": 1000.0,       
+    "risk_per_trade_pct": 2.0,    
+    "max_open_trades": 5,         
+    "fib_lookback": 144,          
     "timeframe_analysis": "15m",
-    "request_delay": 0.8          # التأخير لتجنب الحظر (ثانية)
+    "request_delay": 0.8          
 }
 
 # تخزين الحالة العامة
 system_state = {
     "market_regime": "Neutral",
     "trend_strength": 0,
-    "active_symbols_pool": [],    # القائمة المفلترة للعملات
+    "active_symbols_pool": [],    
     "last_scan_time": None
 }
 
@@ -109,67 +108,90 @@ def check_db():
         except:
             pass
 
-# --- 4. التحليل الفني ومستويات فيبوناتشي ---
+# --- 4. التحليل الفني ومستويات فيبوناتشي (تم الإصلاح) ---
 def calculate_fibonacci_levels(df, period=144):
     """حساب مستويات فيبوناتشي بناءً على أعلى قمة وأدنى قاع"""
-    # نأخذ نافذة زمنية محددة
     window = df.iloc[-period:]
     high_price = window['high'].max()
     low_price = window['low'].min()
     diff = high_price - low_price
     
     levels = {
-        '0.0': high_price, # القمة
+        '0.0': high_price, 
         '0.236': high_price - 0.236 * diff,
         '0.382': high_price - 0.382 * diff,
         '0.5': high_price - 0.5 * diff,
-        '0.618': high_price - 0.618 * diff, # النسبة الذهبية
+        '0.618': high_price - 0.618 * diff, 
         '0.786': high_price - 0.786 * diff,
-        '1.0': low_price, # القاع
-        # امتدادات للأهداف
+        '1.0': low_price, 
         'ext_1.272': high_price + 0.272 * diff,
         'ext_1.618': high_price + 0.618 * diff
     }
     return levels, high_price, low_price
 
 def calculate_indicators(df):
+    """
+    حساب جميع المؤشرات الفنية بما في ذلك ADX و ATR لمنع الخطأ
+    """
     df = df.copy()
-    # المتوسطات المتحركة
+    
+    # 1. المتوسطات المتحركة
     df['ema9'] = df['close'].ewm(span=9).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
     df['ema200'] = df['close'].ewm(span=200).mean()
     
-    # RSI
+    # 2. RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # MACD
+    # 3. Stochastic (للحفاظ على مؤشرات اللوحة القديمة إن وجدت)
+    min_rsi = df['rsi'].rolling(14).min()
+    max_rsi = df['rsi'].rolling(14).max()
+    df['stoch_k'] = ((df['rsi'] - min_rsi) / (max_rsi - min_rsi)) * 100
+    
+    # 4. MACD
     ema12 = df['close'].ewm(span=12).mean()
     ema26 = df['close'].ewm(span=26).mean()
     df['macd'] = ema12 - ema26
     df['macd_signal'] = df['macd'].ewm(span=9).mean()
     df['macd_hist'] = df['macd'] - df['macd_signal']
     
-    # Bollinger Bands
+    # 5. Bollinger Bands
     df['bb_mid'] = df['close'].rolling(20).mean()
     std = df['close'].rolling(20).std()
     df['bb_upper'] = df['bb_mid'] + (2*std)
     df['bb_lower'] = df['bb_mid'] - (2*std)
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
     
-    # Volume MA
+    # 6. ADX & ATR (تم استعادتها لإصلاح الخطأ)
+    df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
+    df['atr'] = df['tr'].rolling(14).mean()
+    
+    plus_dm = df['high'].diff()
+    minus_dm = df['low'].diff()
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+    
+    df['plus_di'] = 100 * (pd.Series(plus_dm).rolling(14).mean() / df['atr'])
+    df['minus_di'] = 100 * (pd.Series(minus_dm).rolling(14).mean() / df['atr'])
+    
+    # تجنب القسمة على صفر
+    sum_di = df['plus_di'] + df['minus_di']
+    df['dx'] = 100 * np.abs(df['plus_di'] - df['minus_di']) / sum_di.replace(0, 1)
+    df['adx'] = df['dx'].rolling(14).mean()
+
+    # 7. Volume MA
     df['vol_ma'] = df['volume'].rolling(20).mean()
     
     return df.fillna(0)
 
 # --- 5. فلترة السوق المتقدمة ---
 def filter_top_symbols(client):
-    """اختيار أفضل 20 عملة بناءً على السيولة والنشاط"""
     try:
         tickers = client.get_ticker()
-        # 1. فلتر أولي: عملات USDT فقط وتجاهل العملات المستقرة المعروفة
         stablecoins = ['USDCUSDT', 'TUSDUSDT', 'FDUSDUSDT', 'DAIUSDT', 'USDPUSDT']
         valid = []
         
@@ -177,7 +199,6 @@ def filter_top_symbols(client):
             s = t['symbol']
             if not s.endswith('USDT') or s in stablecoins: continue
             
-            # تجاهل العملات ذات الحجم الضئيل (أقل من 10 مليون دولار) لتجنب الانزلاق
             q_vol = float(t['quoteVolume'])
             if q_vol < 10_000_000: continue 
             
@@ -185,27 +206,23 @@ def filter_top_symbols(client):
                 'symbol': s,
                 'volume': q_vol,
                 'change': float(t['priceChangePercent']),
-                'count': int(t['count']) # عدد الصفقات
+                'count': int(t['count']) 
             })
             
-        # 2. الترتيب حسب معيار مركب (الحجم * القيمة المطلقة للتغير)
-        # نركز على العملات التي تتحرك ولها سيولة
         valid.sort(key=lambda x: x['volume'] * abs(x['change']), reverse=True)
-        
         top_20 = [x['symbol'] for x in valid[:20]]
         logger.info(f"🔎 تم تحديث القائمة المختارة: {top_20}")
         return top_20
         
     except Exception as e:
         logger.error(f"خطأ في فلترة الرموز: {e}")
-        return ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'] # قائمة احتياطية
+        return ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT']
 
 # --- 6. استراتيجيات التداول الديناميكية ---
 def analyze_signal(symbol, df, regime):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # حساب فيبوناتشي
     fibs, high_p, low_p = calculate_fibonacci_levels(df, BOT_SETTINGS['fib_lookback'])
     current_price = last['close']
     
@@ -213,34 +230,27 @@ def analyze_signal(symbol, df, regime):
     reason = ""
     fib_note = ""
     
-    # -- الفلاتر الديناميكية حسب حالة السوق --
-    
     # 1. استراتيجية الارتداد من فيبوناتشي 0.618 (Golden Pocket)
-    # فعالة في الاتجاه الصاعد (Bull Trend)
     if "Bull" in regime:
-        # السعر قريب من مستوى 0.618 أو 0.5
         dist_to_618 = abs(current_price - fibs['0.618']) / current_price
         dist_to_050 = abs(current_price - fibs['0.5']) / current_price
         
-        if (dist_to_618 < 0.005 or dist_to_050 < 0.005): # قريب جداً (0.5%)
-            # شرط التأكيد: RSI ليس مشبعاً بالشراء + شمعة خضراء
+        if (dist_to_618 < 0.005 or dist_to_050 < 0.005): 
             if last['rsi'] < 70 and last['close'] > last['open']:
                 signal = "Fib_Retracement_Entry"
                 reason = "ارتداد من المنطقة الذهبية (0.5-0.618)"
                 fib_note = "Bounce 0.618"
 
-    # 2. استراتيجية اختراق فيبوناتشي (للأسواق القوية)
+    # 2. استراتيجية اختراق فيبوناتشي
     elif "Volatile" in regime or "Bull" in regime:
-        # اختراق القمة السابقة (مستوى 0) مع زخم
         if prev['close'] < fibs['0.0'] and last['close'] > fibs['0.0']:
-            if last['volume'] > last['vol_ma'] * 1.5: # شرط حجم تداول عالي
+            if last['volume'] > last['vol_ma'] * 1.5: 
                 signal = "Fib_Breakout"
                 reason = "اختراق القمة السابقة بزخم عالي"
                 fib_note = "Break Level 0"
 
     # 3. استراتيجية السكالبينج (للسوق العرضي)
     elif "Ranging" in regime:
-        # الشراء عند الدعم (BB Lower) والبيع عند المقاومة
         if last['close'] < last['bb_lower'] and last['rsi'] < 30:
              signal = "BB_Reversal"
              reason = "ارتداد من قاع بولنجر (تشبع بيعي)"
@@ -253,9 +263,8 @@ def analyze_signal(symbol, df, regime):
 # --- 7. المحرك الرئيسي للبوت ---
 def bot_engine():
     client = Client(API_KEY, API_SECRET)
-    logger.info("🚀 تم تشغيل محرك SmartBot Fib Pro")
+    logger.info("🚀 تم تشغيل محرك SmartBot Fib Pro (Fixed)")
     
-    # تأخير أولي
     time.sleep(2)
     
     while True:
@@ -270,35 +279,32 @@ def bot_engine():
                 time.sleep(5)
                 continue
 
-            # 1. تحديث القائمة المختارة (كل 30 دقيقة تقريباً أو إذا كانت فارغة)
             if not system_state['active_symbols_pool'] or datetime.now().minute % 30 == 0:
                 with locks['market']:
                     system_state['active_symbols_pool'] = filter_top_symbols(client)
                 time.sleep(delay)
 
-            # 2. تحليل حالة السوق (على البيتكوين)
+            # تحليل حالة السوق (BTC)
             btc_df = fetch_data(client, 'BTCUSDT', '4h', 100)
             if btc_df is not None:
                 btc_df = calculate_indicators(btc_df)
-                update_market_regime(btc_df)
+                update_market_regime(btc_df) # الآن لن يسبب خطأ ADX
             time.sleep(delay)
 
             regime = system_state['market_regime']
             
-            # 3. إدارة الصفقات المفتوحة
+            # إدارة الصفقات
             manage_open_trades(client, paper, delay)
             
-            # 4. البحث عن فرص جديدة
             with locks['signals']: current_opens = len(open_signals_cache)
             
             if current_opens < max_trades:
                 for sym in system_state['active_symbols_pool']:
                     if current_opens >= max_trades: break
-                    if sym in open_signals_cache: continue # تخطي العملات المفتوحة
+                    if sym in open_signals_cache: continue
                     
-                    # جلب البيانات
-                    df = fetch_data(client, sym, BOT_SETTINGS['timeframe_analysis'], 200) # نحتاج 200 للفيبوناتشي
-                    time.sleep(delay) # 🛑 الانتظار لتجنب الحظر
+                    df = fetch_data(client, sym, BOT_SETTINGS['timeframe_analysis'], 200)
+                    time.sleep(delay)
                     
                     if df is None: continue
                     
@@ -309,11 +315,10 @@ def bot_engine():
                         execute_trade_logic(sym, df, fibs, signal_name, reason, fib_note, paper)
                         current_opens += 1
                     else:
-                        # تسجيل محاولة فحص عشوائية (ليس كل مرة لتخفيف الضغط)
                         if random.random() < 0.1:
                             log_scan(sym, 'فحص', 'لا توجد إشارة')
 
-            time.sleep(10) # راحة قصيرة قبل الدورة التالية
+            time.sleep(10)
 
         except Exception as e:
             logger.error(f"خطأ في المحرك الرئيسي: {e}")
@@ -332,16 +337,15 @@ def fetch_data(client, symbol, interval, limit):
 
 def update_market_regime(df):
     last = df.iloc[-1]
-    # منطق مبسط لتحديد الحالة
     trend = "Neutral"
     if last['ema50'] > last['ema200']: trend = "Bull"
     elif last['ema50'] < last['ema200']: trend = "Bear"
     
-    if last['adx'] < 20: trend += "_Ranging" # عرضي
-    elif last['adx'] > 30: trend += "_Strong" # قوي
+    # استخدام ADX الآن آمن
+    if last['adx'] < 20: trend += "_Ranging" 
+    elif last['adx'] > 30: trend += "_Strong"
     
-    # قياس التذبذب
-    atr = last['high'] - last['low'] # تقريبي
+    atr = last['atr']
     atr_pct = (atr / last['close']) * 100
     if atr_pct > 2.0: trend = "High_Volatility"
     
@@ -352,53 +356,43 @@ def update_market_regime(df):
 # --- 8. تنفيذ وإدارة الصفقات ---
 def execute_trade_logic(symbol, df, fibs, strategy, reason, fib_note, is_paper):
     last_price = df['close'].iloc[-1]
-    
-    # تحديد الأهداف والوقف بناءً على مستويات فيبوناتشي
-    # نجد أقرب مستوى فيبوناتشي تحت السعر ليكون وقف الخسارة
     sorted_levels = sorted([v for k,v in fibs.items() if not k.startswith('ext')])
     
-    # الافتراضي
     sl = last_price * 0.98
     tp1 = last_price * 1.02
     tp2 = last_price * 1.04
     
-    # محاولة استخدام الفيبوناتشي بدقة
     try:
         below_levels = [l for l in sorted_levels if l < last_price]
         above_levels = [l for l in sorted_levels if l > last_price]
         
         if below_levels:
-            # الوقف تحت أقرب مستوى دعم
-            sl = below_levels[-1] * 0.995 # هامش بسيط تحت الدعم
+            sl = below_levels[-1] * 0.995 
         
         if above_levels:
-            tp1 = above_levels[0] # أول مقاومة
+            tp1 = above_levels[0]
             if len(above_levels) > 1:
-                tp2 = above_levels[1] # ثاني مقاومة
+                tp2 = above_levels[1] 
             else:
-                tp2 = fibs.get('ext_1.272', last_price * 1.05) # استخدام الامتداد
+                tp2 = fibs.get('ext_1.272', last_price * 1.05) 
         else:
-            # نحن في قمة جديدة، نستخدم الامتدادات
             tp1 = fibs.get('ext_1.272', last_price * 1.03)
             tp2 = fibs.get('ext_1.618', last_price * 1.06)
 
-    except: pass # الرجوع للافتراضي عند الخطأ
+    except: pass 
 
-    # حساب الكمية (إدارة المخاطر)
     risk_amt = BOT_SETTINGS['base_capital'] * (BOT_SETTINGS['risk_per_trade_pct'] / 100)
     loss_per_share = last_price - sl
-    if loss_per_share <= 0: loss_per_share = last_price * 0.01 # حماية من القسمة على صفر
+    if loss_per_share <= 0: loss_per_share = last_price * 0.01 
     
     qty = risk_amt / loss_per_share
     
-    # فتح الصفقة
     trade_data = {
         'symbol': symbol, 'entry_price': last_price, 'sl': sl, 
         'tp1': tp1, 'tp2': tp2, 'qty': qty, 'strat': strategy, 
         'note': f"{reason} | {fib_note}", 'regime': system_state['market_regime']
     }
     
-    # حفظ في الذاكرة وقاعدة البيانات
     save_new_trade(trade_data, is_paper)
 
 def manage_open_trades(client, is_paper, delay):
@@ -406,37 +400,26 @@ def manage_open_trades(client, is_paper, delay):
     
     for trade in trades:
         sym = trade['symbol']
-        
-        # جلب سعر لحظي
         try:
             ticker = client.get_symbol_ticker(symbol=sym)
             curr_price = float(ticker['price'])
             with locks['prices']: live_prices[sym] = curr_price
-            time.sleep(delay) # 🛑 تأخير
+            time.sleep(delay) 
         except: continue
         
-        # فحص الشروط
         sl = trade['stop_loss']
         tp1 = trade['tp1']
         tp2 = trade['tp2']
-        
         exit_reason = None
         
-        # 1. وقف الخسارة
         if curr_price <= sl:
             exit_reason = "ضرب وقف الخسارة (Fib Support Broken)"
-        
-        # 2. الهدف الثاني (خروج كامل)
         elif curr_price >= tp2:
             exit_reason = "تحقق الهدف النهائي (TP2)"
-            
-        # 3. إدارة الهدف الأول (حجز أرباح)
         elif curr_price >= tp1:
-            # هنا يمكننا رفع الوقف لنقطة الدخول (Breakeven) بدلاً من الإغلاق
             if sl < trade['entry_price']:
-                new_sl = trade['entry_price'] * 1.002 # فوق الدخول بقليل لتغطية العمولات
+                new_sl = trade['entry_price'] * 1.002 
                 update_sl_in_db(trade['id'], new_sl, sym)
-                # نرسل تنبيه فقط ولا نغلق
         
         if exit_reason:
             close_trade_final(sym, curr_price, exit_reason, is_paper)
@@ -494,7 +477,6 @@ def update_sl_in_db(trade_id, new_sl, symbol):
         with locks['signals']:
             if symbol in open_signals_cache:
                 open_signals_cache[symbol]['stop_loss'] = new_sl
-        
         check_db()
         with conn.cursor() as cur:
             cur.execute("UPDATE trades_fib_v1 SET stop_loss=%s WHERE id=%s", (new_sl, trade_id))
@@ -529,7 +511,6 @@ def get_data():
     with locks['prices']: p = live_prices.copy()
     with locks['logs']: l = list(scan_logs)
     
-    # إزالة التواريخ من الرد لضمان توافق JSON
     safe_signals = []
     for t in s:
         temp = t.copy()
@@ -546,12 +527,11 @@ def get_data():
 
 @app.route('/api/close_manual', methods=['POST'])
 def manual_close():
-    """واجهة برمجة التطبيقات للإغلاق اليدوي"""
     data = request.json
     symbol = data.get('symbol')
     price = live_prices.get(symbol, 0)
     
-    if price == 0: # محاولة جلب السعر إذا لم يكن متاحاً
+    if price == 0:
         try:
              client = Client(API_KEY, API_SECRET)
              price = float(client.get_symbol_ticker(symbol=symbol)['price'])
@@ -579,7 +559,6 @@ HTML_TEMPLATE = """
         :root { --bg: #131722; --card: #1e222d; --text: #d1d4dc; --green: #00b59b; --red: #fa3c58; --accent: #2962ff; }
         body { background: var(--bg); color: var(--text); font-family: 'Tajawal', sans-serif; margin: 0; padding: 20px; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 2px solid #2a2e39; padding-bottom: 20px; }
-        .status-badge { padding: 5px 15px; border-radius: 20px; font-weight: bold; font-size: 14px; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 20px; }
         .card { background: var(--card); padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         .card h3 { color: #787b86; font-size: 14px; margin-top: 0; }
@@ -625,7 +604,7 @@ HTML_TEMPLATE = """
         </div>
         <div class="card">
             <h3>الأرباح المحققة (الجلسة)</h3>
-            <div class="value" style="color:var(--green)">$0.00</div> <!-- Placeholder -->
+            <div class="value" style="color:var(--green)">$0.00</div>
         </div>
     </div>
 
@@ -741,11 +720,8 @@ HTML_TEMPLATE = """
 
 if __name__ == "__main__":
     init_db()
-    # تشغيل البوت في مسار منفصل
     t = Thread(target=bot_engine)
     t.daemon = True
     t.start()
-    
-    # تشغيل السيرفر
     print("🚀 Server running on port 5000...")
     app.run(host='0.0.0.0', port=5000)
