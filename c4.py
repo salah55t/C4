@@ -64,7 +64,7 @@ except Exception as e:
 LEADING_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT']
 current_market_regime: str = "sideways"
 market_score: int = 50
-is_trading_enabled: bool = False
+is_trading_enabled: bool = True
 paper_trading_mode: bool = True
 usdt_balance: float = 10000.0
 open_signals_cache: Dict[str, Dict] = {}
@@ -792,4 +792,5 @@ def toggle():
 if __name__ == '__main__':
     init_db()
     Thread(target=main_bot_loop, daemon=True).start()
+
     app.run(host='0.0.0.0', port=PORT, use_reloader=False)
