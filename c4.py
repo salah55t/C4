@@ -1,5 +1,5 @@
 # smart_bot_v2.py
-# --- الجزء الأول: الإعدادات، قاعدة البيانات، وتحليل هيكل السوق المتقدم ---
+# --- الجزء الأول: الإعدادات والمكتبات ---
 
 import time
 import os
@@ -22,6 +22,9 @@ from threading import Thread, Lock
 from datetime import datetime, timezone, timedelta
 from decouple import config
 import warnings
+
+# استيراد أنواع البيانات للتأكد من عدم ظهور خطأ NameError
+from typing import List, Dict, Optional, Any
 
 # --- إعدادات اللوجر ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -65,14 +68,16 @@ market_score: int = 50
 is_trading_enabled: bool = False
 paper_trading_mode: bool = True
 usdt_balance: float = 10000.0
+
+# تعريف المتغيرات بوضوح باستخدام types
 open_signals_cache: Dict[str, Dict] = {}
 live_prices: Dict[str, float] = {}
+strategy_performance: Dict[str, Dict] = {}
 
 # إعدادات إدارة المخاطر
 risk_per_trade: float = 0.02
 max_open_trades: int = 5
 sl_atr_multiplier: float = 2.0
-strategy_performance: Dict[str, Dict] = {}
 
 # أقفال (Locks)
 locks = {
@@ -159,8 +164,7 @@ def analyze_market_structure(client):
         df['macd_signal'] = df['macd'].ewm(span=9).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
         
-        # ADX (تصحيح: التأكد من وجود الأعمدة قبل الحساب)
-        # نضمن وجود العمود لتجنب KeyError
+        # ADX (تصحيح: تهيئة الأعمدة لتجنب الأخطاء)
         df['plus_di'] = 0.0
         df['minus_di'] = 0.0
         df['dx'] = 0.0
@@ -172,7 +176,7 @@ def analyze_market_structure(client):
             df['dx'] = 100 * abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di'])
             df['adx'] = df['dx'].rolling(14).mean()
         except:
-            pass # إذا فشل الحساب بسبب عدم كفاية البيانات، نستخدم القيم الافتراضية
+            pass 
         
         last = df.iloc[-1]
         prev = df.iloc[-2]
@@ -185,7 +189,8 @@ def analyze_market_structure(client):
         if last['ema50'] > last['ema200']: symbol_score += 10
         
         if last['macd_hist'] > 0: symbol_score += 5
-        # التأكد من عدم حدوث خطأ عند مقارنة ADX
+        if last['macd_hist'] > prev['macd_hist']: symbol_score += 5
+        
         try:
             if last['adx'] > 25: symbol_score += 10
         except:
@@ -213,50 +218,44 @@ def analyze_market_structure(client):
         try: redis_client.set('market_regime', json.dumps({'regime': current_market_regime, 'score': avg_score}))
         except: pass
 
-# --- حساب المؤشرات (للاستراتيجيات) ---
+# --- حساب المؤشرات ---
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # EMAs
     for span in [7, 21, 50, 200]:
         df[f'ema{span}'] = df['close'].ewm(span=span, adjust=False).mean()
     
-    # Bollinger Bands
     df['bb_mid'] = df['close'].rolling(20).mean()
     df['bb_std'] = df['close'].rolling(20).std()
     df['bb_upper'] = df['bb_mid'] + (2 * df['bb_std'])
     df['bb_lower'] = df['bb_mid'] - (2 * df['bb_std'])
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
 
-    # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
 
-    # MACD
     df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
     df['macd_signal'] = df['macd'].ewm(span=9).mean()
     df['macd_hist'] = df['macd'] - df['macd_signal']
 
-    # Stochastic
     low_14 = df['low'].rolling(14).min()
     high_14 = df['high'].rolling(14).max()
     df['stoch_k'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
     df['stoch_d'] = df['stoch_k'].rolling(3).mean()
 
-    # ATR & ADX (Approx)
     df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
     df['atr'] = df['tr'].rolling(14).mean()
     df['atr_pct'] = (df['atr'] / df['close']) * 100
-    # التأكد من وجود عمود ADX لتجنب KeyError في الاستراتيجيات
+    # التأكد من وجود ADX
     df['adx'] = df['atr_pct'].rolling(14).mean() * 10
     
     df['volume_sma'] = df['volume'].rolling(20).mean()
     
     return df.fillna(0)
 
-# --- الاستراتيجيات المحسنة ---
+# --- الاستراتيجيات ---
 def strategy_momentum_bullish(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -264,13 +263,11 @@ def strategy_momentum_bullish(df):
     is_trend_up = last['close'] > last['ema21'] > last['ema50'] > last['ema200']
     is_momentum_up = last['macd_hist'] > 0 and last['macd_hist'] > prev['macd_hist']
     
-    # فلتر القرب لتجنب الشراء عند القمة
     dist_to_ema = (last['close'] - last['ema21']) / last['ema21']
     is_near_entry = 0 < dist_to_ema < 0.015
     
     is_rsi_ok = 55 < last['rsi'] < 75
     
-    # التأكد من وجود ADX قبل استخدامه
     adx_val = last.get('adx', 0)
     
     if is_trend_up and is_momentum_up and is_near_entry and is_rsi_ok and adx_val > 20:
@@ -434,7 +431,6 @@ def reanalyze_open_position(symbol, signal_data, df, market_regime):
     current_price = float(last['close'])
     profit_pct = (current_price - entry_price) / entry_price * 100
     
-    # خروج طوارئ
     if ("bearish" in market_regime and "volatile" in market_regime) and profit_pct < -1.0:
         return "EXIT_NOW", "EMERGENCY: Crash"
     
