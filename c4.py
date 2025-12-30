@@ -1,4 +1,4 @@
-# smart_bot_part1.py
+# smart_bot_v2.py
 # --- الجزء الأول: الإعدادات، قاعدة البيانات، وتحليل هيكل السوق المتقدم ---
 
 import time
@@ -57,6 +57,8 @@ try:
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
+    TELEGRAM_TOKEN = config('TELEGRAM_BOT_TOKEN', default='')
+    TELEGRAM_CHAT_ID = config('TELEGRAM_CHAT_ID', default='')
 except Exception as e:
     logger.critical(f"❌ فشل تحميل المتغيرات: {e}"); exit(1)
 
@@ -66,9 +68,15 @@ current_market_regime: str = "sideways" # bullish, bearish, sideways, volatile
 market_score: int = 50 # 0-100
 is_trading_enabled: bool = False
 paper_trading_mode: bool = True
-usdt_balance: float = 0.0
+usdt_balance: float = 10000.0  # رصيد افتراضي 10000 USDT
 open_signals_cache: Dict[str, Dict] = {}
 live_prices: Dict[str, float] = {}
+
+# إعدادات إدارة المخاطر
+risk_per_trade: float = 0.02  # 2% من الرصيد لكل صفقة
+max_open_trades: int = 5  # الحد الأقصى للصفقات المفتوحة
+sl_atr_multiplier: float = 2.0  # مضاعف ATR لحساب وقف الخسارة
+strategy_performance: Dict[str, Dict] = {}  # أداء كل استراتيجية
 
 # أقفال (Locks)
 locks = {
@@ -93,7 +101,7 @@ def init_db():
                     status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                     profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
                     is_real_trade BOOLEAN DEFAULT FALSE, quantity DOUBLE PRECISION, closing_reason TEXT,
-                    last_analysis_time TIMESTAMP, analysis_notes TEXT
+                    last_analysis_time TIMESTAMP, analysis_notes TEXT, entry_time TIMESTAMP
                 );
             """)
             # جدول الإشعارات
@@ -115,75 +123,167 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 # --- 🚀 الجديد: تحليل هيكل السوق المتقدم (Market Structure Analysis) ---
 def fetch_historical_data(client, symbol, interval, days) -> Optional[pd.DataFrame]:
-    try:
-        klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
-        if not klines: return None
-        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'x', 'y', 'z', 'a', 'b', 'c'])
-        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-        for col in df.columns: df[col] = pd.to_numeric(df[col])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df
-    except: return None
+    max_retries = 3
+    retry_delay = 1
+    
+    for attempt in range(max_retries):
+        try:
+            klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
+            if not klines: 
+                return None
+                
+            df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'x', 'y', 'z', 'a', 'b', 'c'])
+            df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+            
+            for col in df.columns: 
+                df[col] = pd.to_numeric(df[col])
+                
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            
+            # التحقق من جودة البيانات
+            if df.isnull().values.any():
+                logger.warning(f"Data contains null values for {symbol}, filling with forward fill")
+                df = df.fillna(method='ffill').fillna(method='bfill')
+            
+            return df
+        except BinanceAPIException as e:
+            logger.error(f"Binance API error fetching data for {symbol}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2  # زيادة وقت الانتظار
+                continue
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error fetching data for {symbol}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+            return None
+    
+    return None
 
 def analyze_market_structure(client):
     """
-    تحليل السوق بناءً على الرموز القيادية وليس فقط البيتكوين.
-    يحدد: الاتجاه العام (Regime) وقوة الاتجاه (Score).
+    تحليل السوق بناءً على الرموز القيادية مع مؤشرات إضافية
     """
     global current_market_regime, market_score
     
     scores = []
     details = {}
+    volume_analysis = {}
+    volatility_analysis = {}
     
     logger.info("🔍 جاري تحليل هيكل السوق عبر الرموز القيادية...")
     
     for symbol in LEADING_SYMBOLS:
-        df = fetch_historical_data(client, symbol, '1h', 3) # فريم الساعة لآخر 3 أيام
-        if df is None or len(df) < 50: continue
+        df = fetch_historical_data(client, symbol, '1h', 7) # زيادة فترة التحليل إلى 7 أيام
+        if df is None or len(df) < 100: continue
         
-        # حساب المؤشرات البسيطة للاتجاه
+        # حساب المؤشرات
+        df['ema20'] = df['close'].ewm(span=20).mean()
         df['ema50'] = df['close'].ewm(span=50).mean()
         df['ema200'] = df['close'].ewm(span=200).mean()
-        df['rsi'] = 100 - (100 / (1 + df['close'].diff().apply(lambda x: x if x>0 else 0).rolling(14).mean() / df['close'].diff().apply(lambda x: -x if x<0 else 0).rolling(14).mean()))
+        
+        # تحسين حساب RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # إضافة مؤشر ADX الصحيح
+        df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
+        df['atr'] = df['tr'].rolling(14).mean()
+        df['plus_di'] = 100 * (df['high'].diff().where(df['high'].diff() > 0, 0).rolling(14).mean() / df['atr'])
+        df['minus_di'] = 100 * (df['low'].diff().where(df['low'].diff() < 0, 0).abs().rolling(14).mean() / df['atr'])
+        df['dx'] = 100 * abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di'])
+        df['adx'] = df['dx'].rolling(14).mean()
+        
+        # إضافة مؤشر MACD
+        df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
+        df['macd_signal'] = df['macd'].ewm(span=9).mean()
+        df['macd_hist'] = df['macd'] - df['macd_signal']
+        
+        # تحليل حجم التداول
+        df['volume_sma'] = df['volume'].rolling(20).mean()
+        volume_ratio = df['volume'].iloc[-1] / df['volume_sma'].iloc[-1]
+        volume_analysis[symbol] = volume_ratio
+        
+        # تحليل التقلبات
+        df['volatility'] = df['close'].pct_change().rolling(14).std() * 100
+        volatility_analysis[symbol] = df['volatility'].iloc[-1]
         
         last = df.iloc[-1]
+        prev = df.iloc[-2]
         symbol_score = 50
         
-        # تقييم الاتجاه
+        # تقييم الاتجاه المحسن
+        if last['close'] > last['ema20']: symbol_score += 5
         if last['close'] > last['ema50']: symbol_score += 10
-        if last['close'] > last['ema200']: symbol_score += 10
-        if last['ema50'] > last['ema200']: symbol_score += 10 # Golden Cross Alignment
-        if 50 < last['rsi'] < 70: symbol_score += 5
-        if last['rsi'] > 70: symbol_score -= 5 # Overbought warning
+        if last['close'] > last['ema200']: symbol_score += 15
+        if last['ema20'] > last['ema50']: symbol_score += 5
+        if last['ema50'] > last['ema200']: symbol_score += 10
+        if last['macd_hist'] > 0: symbol_score += 5
+        if last['macd_hist'] > prev['macd_hist']: symbol_score += 5  # MACD الصاعد
+        
+        # تقييم القوة
+        if last['adx'] > 25: symbol_score += 10
+        if last['adx'] > 40: symbol_score += 5  # قوة زائدة
+        
+        # تقييم الحجم
+        if volume_ratio > 1.5: symbol_score += 5
+        
+        # تقييم RSI مع الانحرافات
+        if 40 < last['rsi'] < 60: symbol_score += 5
+        if 60 < last['rsi'] < 70: symbol_score += 5
+        if last['rsi'] > 70: symbol_score -= 10  # تشبع شرائي
+        if last['rsi'] < 30: symbol_score -= 10  # تشبع بيعي
         
         scores.append(symbol_score)
-        details[symbol] = symbol_score
+        details[symbol] = {
+            'score': symbol_score,
+            'volume_ratio': volume_ratio,
+            'volatility': df['volatility'].iloc[-1],
+            'adx': last['adx'],
+            'rsi': last['rsi']
+        }
 
     if not scores: return
 
     avg_score = sum(scores) / len(scores)
+    avg_volume = sum(volume_analysis.values()) / len(volume_analysis)
+    avg_volatility = sum(volatility_analysis.values()) / len(volatility_analysis)
     
-    # تحديد نظام السوق بناءً على متوسط درجات العملات القيادية
+    # تحسين تحديد نظام السوق
     with locks['market']:
         market_score = avg_score
+        
+        # إضافة عامل التقلبات في تحديد النظام
+        volatility_factor = min(1.5, avg_volatility / 2)  # عامل التقلبات
+        
         if avg_score >= 75:
-            current_market_regime = "bullish_strong" # صاعد بقوة
+            current_market_regime = "bullish_strong" if volatility_factor < 1.2 else "bullish_volatile"
         elif avg_score >= 60:
-            current_market_regime = "bullish" # صاعد
+            current_market_regime = "bullish"
         elif avg_score <= 30:
-            current_market_regime = "bearish" # هابط (خطر للدخول)
+            current_market_regime = "bearish" if volatility_factor < 1.2 else "bearish_volatile"
         elif avg_score <= 45:
-            current_market_regime = "bearish_weak" # هابط بضعف
+            current_market_regime = "bearish_weak"
         else:
-            current_market_regime = "sideways" # جانبي
+            current_market_regime = "sideways" if volatility_factor < 1.2 else "sideways_volatile"
 
-    logger.info(f"🌐 حالة السوق المحدثة: {current_market_regime.upper()} (Score: {avg_score:.1f})")
+    logger.info(f"🌐 حالة السوق المحدثة: {current_market_regime.upper()} (Score: {avg_score:.1f}, Volatility: {avg_volatility:.2f}%)")
     # حفظ الحالة في Redis
-    redis_client.set('market_regime', json.dumps({'regime': current_market_regime, 'score': avg_score, 'details': details}))
+    redis_client.set('market_regime', json.dumps({
+        'regime': current_market_regime, 
+        'score': avg_score, 
+        'details': details,
+        'avg_volume': avg_volume,
+        'avg_volatility': avg_volatility
+    }))
 
-# --- نهاية الجزء الأول ---
-# smart_bot_part2.py
 # --- الجزء الثاني: حساب المؤشرات وتعريف الاستراتيجيات ---
 
 # --- دالة حساب المؤشرات الفنية الشاملة ---
@@ -226,6 +326,9 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     # ADX (مبسط)
     df['adx'] = df['atr_pct'].rolling(14).mean() * 10 # تقريبي للأغراض السريعة
 
+    # حجم التداول
+    df['volume_sma'] = df['volume'].rolling(20).mean()
+    
     return df.fillna(0)
 
 # --- 🚀 الجديد: استراتيجيات مخصصة لكل حالة سوق ---
@@ -233,11 +336,15 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 # 1. استراتيجية الزخم (للسوق الصاعد)
 def strategy_momentum_bullish(df):
     last = df.iloc[-1]
-    # شروط قوية: السعر فوق كل المتوسطات، RSI قوي لكن ليس متشبع جداً، الماكد إيجابي
-    if (last['close'] > last['ema21'] > last['ema50']) and \
+    prev = df.iloc[-2]
+    
+    # شروط أكثر صرامة: سعر فوق المتوسطات، حجم متزايد، MACD قوي
+    if (last['close'] > last['ema21'] > last['ema50'] > last['ema200']) and \
        (55 < last['rsi'] < 75) and \
        (last['macd_hist'] > 0) and \
-       (last['adx'] > 20): # وجود اتجاه
+       (last['macd_hist'] > prev['macd_hist']) and  # MACD صاعد
+       (last['adx'] > 25) and  # وجود اتجاه واضح
+       (last['volume'] > last['volume_sma'] * 1.2):  # حجم متزايد
         return True
     return False
 
@@ -245,33 +352,71 @@ def strategy_momentum_bullish(df):
 def strategy_pullback_bullish(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    
     # اتجاه عام صاعد (فوق EMA200)
     if last['close'] > last['ema200']:
         # السعر يلمس EMA50 أو يقترب منها ثم يرتد
-        if (last['low'] <= last['ema50'] * 1.005) and (last['close'] > last['ema50']):
+        if (last['low'] <= last['ema50'] * 1.01) and (last['close'] > last['ema50']):
             # تأكيد من الستوكاستك (تشبع بيعي ثم تقاطع)
             if last['stoch_k'] < 40 and last['stoch_k'] > last['stoch_d']:
-                return True
+                # تأكيد من حجم التداول
+                if last['volume'] > last['volume_sma'] * 1.1:
+                    return True
     return False
 
 # 3. استراتيجية التذبذب (Range Trading) (للسوق الجانبي)
 def strategy_sideways_scalp(df):
     last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
     # البولنجر باند مستوي (عرض قليل نسبياً)
-    if last['bb_width'] < 0.05: # يعتمد على العملة، هذه قيمة تقريبية
-        # الشراء من الحد السفلي
+    if last['bb_width'] < 0.05:
+        # الشراء من الحد السفلي مع تأكيد الحجم
         if last['close'] <= last['bb_lower'] * 1.01 and last['rsi'] < 40:
-            return True
+            if last['volume'] > last['volume_sma'] * 1.2:
+                return True
     return False
 
 # 4. استراتيجية القنص (Oversold Bounce) (للسوق الهابط - خطرة)
 def strategy_bearish_bounce(df):
     last = df.iloc[-1]
-    # ابحث عن انحراف شديد عن EMA50
+    prev = df.iloc[-2]
+    
+    # انحراف شديد عن EMA50
     dist_from_ema = (last['ema50'] - last['close']) / last['ema50']
-    # انخفاض حاد + RSI منخفض جداً
+    # انخفاض حاد + RSI منخفض جداً + حجم مرتفع
     if dist_from_ema > 0.08 and last['rsi'] < 25:
+        if last['volume'] > last['volume_sma'] * 1.5:  # حجم مرتفع عند الارتداد
+            return True
+    return False
+
+# استراتيجية جديدة: استراتيجية الاختراق
+def strategy_breakout(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # حساب نطاق التداول الأخير
+    df['high_20'] = df['high'].rolling(20).max()
+    df['low_20'] = df['low'].rolling(20).min()
+    
+    # شرط الاختراق فوق مستوى مقاومة مع حجم مرتفع
+    if (last['close'] > df['high_20'].iloc[-2]) and \
+       (last['volume'] > last['volume_sma'] * 1.5) and \
+       (last['rsi'] > 50):
         return True
+    return False
+
+# استراتيجية جديدة: استراتيجية التراجع القوي
+def strategy_deep_pullback(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # اتجاه عام صاعد
+    if last['ema50'] > last['ema200']:
+        # تراجع عميق إلى EMA200 مع مؤشرات قوة
+        if (last['close'] < last['ema50']) and (last['close'] > last['ema200'] * 0.98):
+            if (last['rsi'] < 35) and (last['volume'] > last['volume_sma'] * 1.3):
+                return True
     return False
 
 # --- دالة اختيار الاستراتيجية المناسبة ---
@@ -289,6 +434,8 @@ def get_signal_from_strategies(symbol, df, regime):
             return "Momentum_Bullish"
         if strategy_pullback_bullish(df):
             return "Pullback_Bullish"
+        if strategy_breakout(df):
+            return "Breakout"
     
     elif regime == "sideways":
         # في السوق الجانبي نبحث عن تداول النطاق
@@ -309,23 +456,31 @@ def calculate_entry_params(df, strategy_name):
     close = last['close']
     
     # إعدادات افتراضية
-    sl_dist = atr * 2
+    sl_dist = atr * sl_atr_multiplier
     tp1_dist = atr * 3
     tp2_dist = atr * 5
     
     # تخصيص حسب الاستراتيجية
     if strategy_name == "Momentum_Bullish":
-        sl_dist = atr * 1.5 # وقف قريب للحفاظ على الزخم
+        sl_dist = atr * 1.5
         tp1_dist = atr * 2.5
-        tp2_dist = atr * 6 # طموح
+        tp2_dist = atr * 6
     elif strategy_name == "Range_Scalp":
         sl_dist = atr * 1.2
-        tp1_dist = (last['bb_mid'] - close) * 0.9 # الهدف هو خط المنتصف
-        tp2_dist = (last['bb_upper'] - close) * 0.9 # الحد العلوي
+        tp1_dist = (last['bb_mid'] - close) * 0.9
+        tp2_dist = (last['bb_upper'] - close) * 0.9
     elif strategy_name == "Oversold_Bounce":
-        sl_dist = atr * 2.5 # وقف واسع للتقلبات
-        tp1_dist = atr * 2 # خروج سريع
+        sl_dist = atr * 2.5
+        tp1_dist = atr * 2
         tp2_dist = atr * 3
+    elif strategy_name == "Breakout":
+        sl_dist = atr * 1.8
+        tp1_dist = atr * 3
+        tp2_dist = atr * 7
+    elif strategy_name == "Deep_Pullback":
+        sl_dist = atr * 2
+        tp1_dist = atr * 3
+        tp2_dist = atr * 5
 
     stop_loss = close - sl_dist
     target1 = close + tp1_dist
@@ -333,15 +488,9 @@ def calculate_entry_params(df, strategy_name):
     
     return stop_loss, target1, target2
 
-# --- نهاية الجزء الثاني ---
-# smart_bot_part3_v2.py
-# --- الجزء الثالث (المعدل): التنفيذ، تلغرام، وإعادة التحليل ---
-# استبدل الجزء الثالث القديم بهذا الملف بالكامل
+# --- الجزء الثالث: التنفيذ، تلغرام، وإعادة التحليل ---
 
 # --- إعدادات تلغرام ---
-TELEGRAM_TOKEN = config('TELEGRAM_BOT_TOKEN', default='')
-TELEGRAM_CHAT_ID = config('TELEGRAM_CHAT_ID', default='')
-
 def send_telegram_alert(message):
     """إرسال تنبيهات إلى تلغرام مع معالجة الأخطاء"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -359,28 +508,78 @@ def send_telegram_alert(message):
     except Exception as e:
         logger.error(f"فشل إرسال تلغرام: {e}")
 
+# --- تحسين إدارة المخاطر ---
+def calculate_position_size(symbol, price, atr, risk_per_trade=0.02):
+    """
+    حساب حجم المركز بناءً على نسبة المخاطرة المحددة وقيمة ATR
+    """
+    try:
+        # الحصول على رصيد الحساب
+        with locks['balance']:
+            balance = usdt_balance
+        
+        # حساب حجم المركز بناءً على نسبة المخاطرة
+        risk_amount = balance * risk_per_trade
+        
+        # حساب حجم الموقف بناءً على مسافة وقف الخسارة (2x ATR)
+        stop_distance = atr * sl_atr_multiplier
+        position_size = risk_amount / stop_distance
+        
+        # الحصول على معلومات الرمز لتحديد الحد الأدنى للكمية
+        symbol_info = client.get_symbol_info(symbol)
+        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+        if lot_size_filter:
+            step_size = float(lot_size_filter['stepSize'])
+            position_size = round(position_size / step_size) * step_size
+        
+        # التأكد من أن حجم الموقف لا يتجاوز 20% من الرصيد
+        max_position_value = balance * 0.2
+        if position_size * price > max_position_value:
+            position_size = max_position_value / price
+            position_size = round(position_size / step_size) * step_size
+        
+        return position_size
+    except Exception as e:
+        logger.error(f"Error calculating position size: {e}")
+        return 0.0
+
 # --- دالة التنفيذ الذكية (ورقي / حقيقي) ---
 def execute_order(client, symbol, side, quantity, price=None, order_type='MARKET'):
     """
-    تنفذ الطلب بناءً على وضع التداول (ورقي أو حقيقي)
+    تنفذ الطلب بناءً على وضع التداول (ورقي أو حقيقي) مع تحسينات
     """
     global usdt_balance, paper_trading_mode
     
     # 1. التنفيذ الورقي (Paper)
     if paper_trading_mode:
         logger.info(f"📝 تنفيذ ورقي: {side} {symbol} الكمية: {quantity}")
-        return {"status": "FILLED", "executedQty": quantity, "price": price if price else live_prices.get(symbol, 0), "orderId": "PAPER_123"}
+        # محاكاة انزلاق السعر
+        slippage = 0.0005 if order_type == 'MARKET' else 0
+        executed_price = (price if price else live_prices.get(symbol, 0)) * (1 + slippage if side == Client.SIDE_BUY else 1 - slippage)
+        return {"status": "FILLED", "executedQty": quantity, "price": executed_price, "orderId": "PAPER_123"}
     
     # 2. التنفيذ الحقيقي (Real)
     else:
         try:
             logger.info(f"🚨 تنفيذ حقيقي: {side} {symbol}...")
-            # تحويل الكمية للصيغة المقبولة (Precision)
-            # (هنا يجب إضافة كود لضبط الكمية حسب stepSize الخاص بباينانس لتجنب الأخطاء)
             
+            # تحويل الكمية للصيغة المقبولة (Precision)
+            symbol_info = client.get_symbol_info(symbol)
+            lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+            if lot_size_filter:
+                step_size = float(lot_size_filter['stepSize'])
+                quantity = round(quantity / step_size) * step_size
+            
+            # محاولة تنفيذ الأمر
             if order_type == 'MARKET':
                 order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=quantity)
             else:
+                # تحويل السعر للصيغة المقبولة
+                price_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER'), None)
+                if price_filter:
+                    tick_size = float(price_filter['tickSize'])
+                    price = round(price / tick_size) * tick_size
+                
                 order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=quantity, price=str(price))
             
             return order
@@ -389,7 +588,7 @@ def execute_order(client, symbol, side, quantity, price=None, order_type='MARKET
             send_telegram_alert(f"❌ فشل تنفيذ صفقة حقيقية لـ {symbol}: {e}")
             return None
 
-# --- آلية إعادة تحليل الإشارات المفتوحة (The Brain) ---
+# --- تحسين آلية إعادة تحليل الإشارات المفتوحة ---
 def reanalyze_open_position(symbol, signal_data, df, market_regime):
     last = df.iloc[-1]
     entry_price = float(signal_data['entry_price'])
@@ -398,21 +597,41 @@ def reanalyze_open_position(symbol, signal_data, df, market_regime):
     
     action = "HOLD"
     reason = ""
-
+    
+    # حساب التقلبات الحالية
+    current_atr = last['atr']
+    atr_pct = (current_atr / current_price) * 100
+    
     # 1. الحماية: السوق انقلب ضدنا
-    if market_regime == "bearish" and signal_data['strategy_name'] in ["Momentum_Bullish", "Pullback_Bullish"]:
+    if "bearish" in market_regime and signal_data['strategy_name'] in ["Momentum_Bullish", "Pullback_Bullish", "Breakout"]:
         if profit_pct < -0.5: return "EXIT_NOW", "انقلاب السوق للهبوط"
         elif profit_pct > 0.5: return "TIGHTEN_SL", "حماية الربح (سوق هابط)"
-
+    
     # 2. ضعف الزخم الفني
     if signal_data['strategy_name'] == "Momentum_Bullish":
         if last['rsi'] < 48:
             return ("TIGHTEN_SL", "ضعف الزخم (RSI)") if profit_pct > 0 else ("EXIT_NOW", "فشل الزخم")
+        # انحراف MACD السلبي
+        if last['macd_hist'] < 0 and profit_pct < 1.0:
+            return "EXIT_NOW", "انحراف MACD سلبي"
     
     # 3. تعزيز الربح
     if profit_pct > 2.5 and last['macd_hist'] > 0:
         return "EXTEND_TP", "زخم قوي جداً 🚀"
-
+    
+    # 4. إدارة التقلبات
+    if atr_pct > 3.0:  # تقلبات عالية
+        if profit_pct > 1.0:
+            return "TIGHTEN_SL", "حماية الربح في سوق متقلب"
+        elif profit_pct < -1.0:
+            return "EXIT_NOW", "خروج بسبب تقلبات عالية"
+    
+    # 5. وقف متحرك
+    if profit_pct > 3.0:
+        new_sl = current_price - (current_atr * 1.5)
+        if new_sl > float(signal_data['stop_loss']):
+            return "TRAILING_SL", f"رفع الوقف المتحرك إلى {new_sl:.4f}"
+    
     return action, reason
 
 # --- حلقة إدارة الصفقات ---
@@ -460,6 +679,14 @@ def trade_management_loop(client):
                         msg = f"🛡️ *تحديث {symbol}*\nتم رفع الوقف إلى: `{new_sl:.4f}`\nالسبب: {reason}"
                         logger.info(msg)
                         send_telegram_alert(msg)
+                
+                elif action == "TRAILING_SL":
+                    new_sl = current_price - (df.iloc[-1]['atr'] * 1.5)
+                    if new_sl > sl:
+                        update_signal_sl(signal['id'], new_sl)
+                        msg = f"🛡️ *تحديث {symbol}*\nتم رفع الوقف المتحرك إلى: `{new_sl:.4f}`\nالسبب: {reason}"
+                        logger.info(msg)
+                        send_telegram_alert(msg)
 
             time.sleep(5)
         except Exception as e:
@@ -467,23 +694,56 @@ def trade_management_loop(client):
 
 def close_trade(client, signal, price, reason):
     qty = float(signal['quantity'])
+    
     # تنفيذ أمر البيع
     order = execute_order(client, signal['symbol'], Client.SIDE_SELL, qty)
     
     if order:
-        profit_pct = (price - float(signal['entry_price'])) / float(signal['entry_price']) * 100
+        # حساب السعر الفعلي من الطلب
+        executed_price = float(order.get('price', price))
+        entry_price = float(signal['entry_price'])
+        profit_pct = (executed_price - entry_price) / entry_price * 100
+        
         # تحديث قاعدة البيانات وحذف من الكاش
         with locks['signals']:
             if signal['symbol'] in open_signals_cache: del open_signals_cache[signal['symbol']]
         
+        # تحديث أداء الاستراتيجية
+        strategy_name = signal['strategy_name']
+        with locks['market']:
+            if strategy_name not in strategy_performance:
+                strategy_performance[strategy_name] = {
+                    'total_trades': 0,
+                    'winning_trades': 0,
+                    'total_profit': 0,
+                    'total_loss': 0
+                }
+            
+            strategy_performance[strategy_name]['total_trades'] += 1
+            if profit_pct > 0:
+                strategy_performance[strategy_name]['winning_trades'] += 1
+                strategy_performance[strategy_name]['total_profit'] += profit_pct
+            else:
+                strategy_performance[strategy_name]['total_loss'] += abs(profit_pct)
+            
+            # حفظ أداء الاستراتيجية في Redis
+            redis_client.set('strategy_performance', json.dumps(strategy_performance))
+        
         # إرسال تنبيه تلغرام
         emoji = "✅" if profit_pct > 0 else "🔻"
         msg = (f"{emoji} *إغلاق صفقة {signal['symbol']}*\n"
+               f"الاستراتيجية: {strategy_name}\n"
                f"الربح: `{profit_pct:.2f}%`\n"
-               f"السعر: `{price}`\n"
+               f"سعر الدخول: `{entry_price}`\n"
+               f"سعر الخروج: `{executed_price}`\n"
                f"السبب: {reason}")
         send_telegram_alert(msg)
         logger.info(f"Closed {signal['symbol']}: {profit_pct:.2f}%")
+        
+        # تحديث الرصيد في الوضع الورقي
+        if paper_trading_mode:
+            with locks['balance']:
+                usdt_balance += (executed_price * qty) * (1 - 0.001)  # خصم رسوم تقديرية
 
 def update_signal_sl(id, new_sl):
     with locks['signals']:
@@ -493,38 +753,66 @@ def update_signal_sl(id, new_sl):
 # --- الحلقة الرئيسية (Main Loop) ---
 def main_bot_loop():
     logger.info("🚀 بدء البوت الرئيسي...")
+    global client
     client = Client(API_KEY, API_SECRET)
     Thread(target=trade_management_loop, args=(client,), daemon=True).start()
     
+    # تحميل الإعدادات من Redis
+    settings = redis_client.get('bot_settings')
+    if settings:
+        settings = json.loads(settings)
+        global risk_per_trade, max_open_trades, sl_atr_multiplier
+        risk_per_trade = settings.get('risk_per_trade', 0.02)
+        max_open_trades = settings.get('max_open_trades', 5)
+        sl_atr_multiplier = settings.get('sl_atr_multiplier', 2.0)
+    
     while True:
         try:
-            if not is_trading_enabled: time.sleep(10); continue
+            if not is_trading_enabled: 
+                time.sleep(10)
+                continue
             
+            # تحليل هيكل السوق
             analyze_market_structure(client)
             
             # جلب رموز نشطة
             tickers = client.get_ticker()
             symbols = [t['symbol'] for t in tickers if t['symbol'].endswith('USDT') and float(t['quoteVolume']) > 20000000]
-            random.shuffle(symbols) # تنويع البحث
+            random.shuffle(symbols)  # تنويع البحث
 
-            for symbol in symbols[:20]:
+            # تحديد عدد الرموز التي سيتم تحليلها بناءً على حالة السوق
+            scan_limit = 30 if "bullish" in current_market_regime else 20
+            
+            for symbol in symbols[:scan_limit]:
                 with locks['signals']:
-                    if symbol in open_signals_cache: continue
+                    if symbol in open_signals_cache: 
+                        continue
+                    
+                    # التحقق من الحد الأقصى للصفقات المفتوحة
+                    if len(open_signals_cache) >= max_open_trades:
+                        break
                 
                 df = fetch_historical_data(client, symbol, '5m', 2)
-                if df is None: continue
+                if df is None: 
+                    continue
+                
                 df = calculate_features(df)
                 
-                with locks['market']: regime = current_market_regime
+                with locks['market']: 
+                    regime = current_market_regime
+                
                 strategy = get_signal_from_strategies(symbol, df, regime)
                 
                 if strategy:
                     current_price = df.iloc[-1]['close']
                     sl, tp1, tp2 = calculate_entry_params(df, strategy)
                     
-                    # تحديد الكمية (مثلاً 15 دولار)
-                    quantity = 15.0 / current_price 
-                    # (ملاحظة: في التطبيق الحقيقي يجب ضبط الدقة stepSize)
+                    # حساب حجم الموقف بناءً على نسبة المخاطرة
+                    quantity = calculate_position_size(symbol, current_price, df.iloc[-1]['atr'], risk_per_trade)
+                    
+                    if quantity <= 0:
+                        logger.warning(f"كمية غير صالحة لـ {symbol}: {quantity}")
+                        continue
                     
                     # تنفيذ الشراء
                     order = execute_order(client, symbol, Client.SIDE_BUY, quantity)
@@ -532,26 +820,56 @@ def main_bot_loop():
                     if order:
                         # حفظ الصفقة
                         signal_data = {
-                            'id': int(time.time()), 'symbol': symbol, 'entry_price': current_price,
-                            'stop_loss': sl, 'target_price_1': tp1, 'target_price_2': tp2,
-                            'quantity': quantity, 'strategy_name': strategy, 'status': 'open'
+                            'id': int(time.time()), 
+                            'symbol': symbol, 
+                            'entry_price': current_price,
+                            'stop_loss': sl, 
+                            'target_price_1': tp1, 
+                            'target_price_2': tp2,
+                            'quantity': quantity, 
+                            'strategy_name': strategy, 
+                            'status': 'open',
+                            'entry_time': datetime.now(timezone.utc).isoformat()
                         }
-                        with locks['signals']: open_signals_cache[symbol] = signal_data
+                        
+                        with locks['signals']: 
+                            open_signals_cache[symbol] = signal_data
                         
                         # إرسال تنبيه تلغرام
                         msg = (f"🚀 *توصية جديدة ({strategy})*\n"
                                f"العملة: `{symbol}`\n"
                                f"الدخول: `{current_price}`\n"
                                f"الهدف: `{tp2}` | الوقف: `{sl}`\n"
+                               f"الكمية: `{quantity}`\n"
                                f"حالة السوق: {regime}")
                         send_telegram_alert(msg)
+                        logger.info(f"New signal: {symbol} - {strategy}")
 
-            time.sleep(120) # انتظار دقيقتين بين دورات المسح
+            # تحديث الرصيد في الوضع الورقي
+            if paper_trading_mode:
+                with locks['balance']:
+                    # حساب القيمة الإجمالية للمحفظة
+                    total_value = usdt_balance
+                    for signal in open_signals_cache.values():
+                        symbol_price = live_prices.get(signal['symbol'], signal['entry_price'])
+                        total_value += symbol_price * signal['quantity']
+                    
+                    # تحديث الرصيد في Redis
+                    redis_client.set('paper_balance', json.dumps({
+                        'usdt': usdt_balance,
+                        'total_value': total_value,
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    }))
+
+            # فترة انتظار متغيرة بناءً على حالة السوق
+            wait_time = 60 if "volatile" in current_market_regime else 120
+            time.sleep(wait_time)
             
         except Exception as e:
-            logger.error(f"Main Loop Error: {e}"); time.sleep(60)
+            logger.error(f"Main Loop Error: {e}")
+            time.sleep(60)
+
 # --- الجزء الرابع: واجهة المستخدم المتقدمة والخادم ---
-# ملاحظة: انسخ هذا الكود وألصقه بدلاً من أسطر تشغيل Flask في نهاية الجزء الثالث.
 
 # --- قالب HTML المتقدم (يدعم حالة السوق الجديدة) ---
 DASHBOARD_TEMPLATE = """
@@ -606,6 +924,18 @@ h1{margin:0;font-size:20px;color:#d7e4ff}
 table {width: 100%; border-collapse: collapse; font-size: 13px;}
 th {text-align: right; color: var(--muted); padding: 8px;}
 td {padding: 8px; border-top: 1px solid #233056;}
+
+/* مؤشرات الأداء */
+.performance-metrics{display:grid;grid-template-columns:repeat(3, 1fr);gap:10px;margin-top:15px}
+.metric{text-align:center}
+.metric-value{font-size:18px;font-weight:bold}
+.metric-label{font-size:12px;color:var(--muted)}
+
+/* إعدادات البوت */
+.settings-grid{display:grid;grid-template-columns:repeat(2, 1fr);gap:15px}
+.setting-item{display:flex;flex-direction:column;margin-bottom:10px}
+.setting-label{font-size:12px;color:var(--muted);margin-bottom:5px}
+.setting-input{background:#0d1730;border:1px solid #233056;color:var(--text);padding:8px;border-radius:4px}
 </style>
 </head>
 <body>
@@ -628,6 +958,16 @@ td {padding: 8px; border-top: 1px solid #233056;}
                 </div>
                 <span class="regime-text" id="marketRegimeText">جاري التحليل...</span>
                 <p style="font-size:12px;color:var(--muted);margin-top:5px">يعتمد على تحليل الرموز القيادية (BTC, ETH, SOL...)</p>
+                <div style="margin-top:10px">
+                    <div class="metric">
+                        <div class="metric-value" id="avgVolumeVal">--</div>
+                        <div class="metric-label">متوسط حجم التداول</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value" id="avgVolatilityVal">--</div>
+                        <div class="metric-label">متوسط التقلب (%)</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -639,6 +979,20 @@ td {padding: 8px; border-top: 1px solid #233056;}
                 <tr><td>الصفقات المفتوحة:</td><td id="openCount">0</td></tr>
                 <tr><td>وضع التداول:</td><td id="tradingMode">--</td></tr>
             </table>
+            <div class="performance-metrics">
+                <div class="metric">
+                    <div class="metric-value" id="winRateVal">--</div>
+                    <div class="metric-label">نسبة الفوز (%)</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="profitFactorVal">--</div>
+                    <div class="metric-label">عامل الربح</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="maxDDVal">--</div>
+                    <div class="metric-label">أقصى انخفاض (%)</div>
+                </div>
+            </div>
             <div style="margin-top:20px;text-align:center">
                 <button class="btn" id="toggleBtn" onclick="toggleTrading()">تشغيل / إيقاف</button>
             </div>
@@ -650,6 +1004,34 @@ td {padding: 8px; border-top: 1px solid #233056;}
         <div id="tradesContainer" class="trades-grid">
             <!-- سيتم ملء الصفقات هنا عبر JS -->
             <p style="color:var(--muted)">جاري انتظار الإشارات...</p>
+        </div>
+    </div>
+    
+    <div class="card" style="margin-top: 20px;">
+        <h2>⚙️ إعدادات البوت</h2>
+        <div class="settings-grid">
+            <div class="setting-item">
+                <label class="setting-label">نسبة المخاطرة للصفقة الواحدة (%)</label>
+                <input type="number" class="setting-input" id="riskPerTrade" value="2" min="0.5" max="5" step="0.5">
+            </div>
+            <div class="setting-item">
+                <label class="setting-label">الحد الأقصى للصفقات المفتوحة</label>
+                <input type="number" class="setting-input" id="maxOpenTrades" value="5" min="1" max="10" step="1">
+            </div>
+            <div class="setting-item">
+                <label class="setting-label">نسبة وقف الخسارة من ATR</label>
+                <input type="number" class="setting-input" id="slAtrMultiplier" value="2" min="1" max="5" step="0.5">
+            </div>
+            <div class="setting-item">
+                <label class="setting-label">تفعيل وضع التداول الورقي</label>
+                <select class="setting-input" id="paperTradingMode">
+                    <option value="true" selected>نعم</option>
+                    <option value="false">لا</option>
+                </select>
+            </div>
+        </div>
+        <div style="margin-top:15px;text-align:center">
+            <button class="btn" onclick="saveSettings()">حفظ الإعدادات</button>
         </div>
     </div>
     
@@ -683,6 +1065,10 @@ td {padding: 8px; border-top: 1px solid #233056;}
                 regimeText.innerText = regime.toUpperCase().replace('_', ' ');
                 regimeText.className = 'regime-text ' + (score > 60 ? 'regime-bullish' : (score < 40 ? 'regime-bearish' : 'regime-sideways'));
 
+                // تحديث بيانات السوق الإضافية
+                document.getElementById('avgVolumeVal').innerText = data.avg_volume ? data.avg_volume.toFixed(2) : '--';
+                document.getElementById('avgVolatilityVal').innerText = data.avg_volatility ? data.avg_volatility.toFixed(2) + '%' : '--';
+
                 // تحديث الرصيد والوضع
                 document.getElementById('balanceVal').innerText = data.balance.toFixed(2);
                 document.getElementById('openCount').innerText = data.open_signals.length;
@@ -691,6 +1077,11 @@ td {padding: 8px; border-top: 1px solid #233056;}
                 const btn = document.getElementById('toggleBtn');
                 btn.className = data.is_enabled ? "btn stop" : "btn";
                 btn.innerText = data.is_enabled ? "إيقاف التداول" : "بدء التداول";
+
+                // تحديث مؤشرات الأداء
+                document.getElementById('winRateVal').innerText = data.win_rate ? data.win_rate.toFixed(1) + '%' : '--';
+                document.getElementById('profitFactorVal').innerText = data.profit_factor ? data.profit_factor.toFixed(2) : '--';
+                document.getElementById('maxDDVal').innerText = data.max_drawdown ? data.max_drawdown.toFixed(1) + '%' : '--';
 
                 // تحديث الصفقات
                 const tradesContainer = document.getElementById('tradesContainer');
@@ -730,6 +1121,32 @@ td {padding: 8px; border-top: 1px solid #233056;}
         fetch('/api/toggle', {method: 'POST'})
         .then(() => updateDashboard());
     }
+    
+    function saveSettings() {
+        const settings = {
+            risk_per_trade: parseFloat(document.getElementById('riskPerTrade').value),
+            max_open_trades: parseInt(document.getElementById('maxOpenTrades').value),
+            sl_atr_multiplier: parseFloat(document.getElementById('slAtrMultiplier').value),
+            paper_trading_mode: document.getElementById('paperTradingMode').value === 'true'
+        };
+        
+        fetch('/api/settings', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(settings)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if(data.success) {
+                alert('تم حفظ الإعدادات بنجاح');
+                updateDashboard();
+            } else {
+                alert('فشل حفظ الإعدادات: ' + data.error);
+            }
+        });
+    }
 
     // تحديث كل 2 ثانية
     setInterval(updateDashboard, 2000);
@@ -763,14 +1180,31 @@ def get_data():
         
     with locks['balance']:
         bal = usdt_balance
-
+    
+    # الحصول على بيانات السوق الإضافية من Redis
+    market_data = redis_client.get('market_regime')
+    avg_volume = 0
+    avg_volatility = 0
+    if market_data:
+        market_data = json.loads(market_data)
+        avg_volume = market_data.get('avg_volume', 0)
+        avg_volatility = market_data.get('avg_volatility', 0)
+    
+    # الحصول على بيانات الأداء
+    performance = get_performance().get_json()
+    
     return jsonify({
         "market_regime": regime,
         "market_score": score,
+        "avg_volume": avg_volume,
+        "avg_volatility": avg_volatility,
         "open_signals": signals_list,
         "live_prices": current_prices,
         "balance": bal,
-        "is_enabled": is_trading_enabled
+        "is_enabled": is_trading_enabled,
+        "win_rate": performance.get('win_rate', 0),
+        "profit_factor": performance.get('profit_factor', 0),
+        "max_drawdown": performance.get('max_drawdown', 0)
     })
 
 @app.route('/api/toggle', methods=['POST'])
@@ -779,6 +1213,88 @@ def toggle_bot():
     is_trading_enabled = not is_trading_enabled
     logger.info(f"تم تغيير حالة البوت إلى: {is_trading_enabled}")
     return jsonify({"status": is_trading_enabled})
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def handle_settings():
+    global risk_per_trade, max_open_trades, sl_atr_multiplier, paper_trading_mode
+    
+    if request.method == 'GET':
+        return jsonify({
+            'risk_per_trade': risk_per_trade,
+            'max_open_trades': max_open_trades,
+            'sl_atr_multiplier': sl_atr_multiplier,
+            'paper_trading_mode': paper_trading_mode
+        })
+    else:  # POST
+        try:
+            settings = request.json
+            risk_per_trade = settings.get('risk_per_trade', 0.02)
+            max_open_trades = settings.get('max_open_trades', 5)
+            sl_atr_multiplier = settings.get('sl_atr_multiplier', 2.0)
+            paper_trading_mode = settings.get('paper_trading_mode', True)
+            
+            # حفظ الإعدادات في Redis
+            redis_client.set('bot_settings', json.dumps(settings))
+            
+            return jsonify({'success': True})
+        except Exception as e:
+            logger.error(f"Error saving settings: {e}")
+            return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/performance')
+def get_performance():
+    try:
+        # حساب مؤشرات الأداء من قاعدة البيانات
+        with conn.cursor() as cur:
+            # حساب نسبة الفوز
+            cur.execute("""
+                SELECT 
+                    COUNT(CASE WHEN profit_percentage > 0 THEN 1 END) * 100.0 / COUNT(*) as win_rate,
+                    SUM(CASE WHEN profit_percentage > 0 THEN profit_percentage ELSE 0 END) / 
+                    NULLIF(SUM(CASE WHEN profit_percentage < 0 THEN ABS(profit_percentage) ELSE 0 END), 0) as profit_factor
+                FROM signals 
+                WHERE status = 'closed' AND closing_price IS NOT NULL
+            """)
+            result = cur.fetchone()
+            win_rate = result['win_rate'] if result['win_rate'] else 0
+            profit_factor = result['profit_factor'] if result['profit_factor'] else 0
+            
+            # حساب أقصى انخفاض
+            cur.execute("""
+                WITH equity_curve AS (
+                    SELECT 
+                        closing_at,
+                        SUM(profit_percentage) OVER (ORDER BY closing_at) as cumulative_profit
+                    FROM signals 
+                    WHERE status = 'closed' AND closing_price IS NOT NULL
+                    ORDER BY closing_at
+                ),
+                peaks AS (
+                    SELECT 
+                        closing_at,
+                        cumulative_profit,
+                        MAX(cumulative_profit) OVER (ORDER BY closing_at) as peak
+                    FROM equity_curve
+                )
+                SELECT 
+                    MIN((cumulative_profit - peak) / peak * 100) as max_drawdown
+                FROM peaks
+            """)
+            result = cur.fetchone()
+            max_drawdown = result['max_drawdown'] if result['max_drawdown'] else 0
+            
+            return jsonify({
+                'win_rate': win_rate,
+                'profit_factor': profit_factor,
+                'max_drawdown': abs(max_drawdown)
+            })
+    except Exception as e:
+        logger.error(f"Error calculating performance: {e}")
+        return jsonify({
+            'win_rate': 0,
+            'profit_factor': 0,
+            'max_drawdown': 0
+        })
 
 # --- تشغيل البرنامج ---
 if __name__ == "__main__":
