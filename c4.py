@@ -140,7 +140,7 @@ class SystemState:
 system_state = SystemState(BOT_SETTINGS.get('base_capital'))
 
 
-# --- 4. Cache (تم الإصلاح هنا) ---
+# --- 4. Cache (تم الإصلاح الشامل هنا) ---
 class ThreadSafeCache:
     def __init__(self, maxlen: int = 200):
         self._data: Dict[str, Any] = {}
@@ -161,8 +161,11 @@ class ThreadSafeCache:
     
     def items(self) -> List[Tuple[str, Any]]:
         with self._lock:
-            # نرجع نسخة لتجنب مشاكل التعديل أثناء الدوران
             return list(self._data.items())
+            
+    def keys(self) -> List[str]:
+        with self._lock:
+            return list(self._data.keys())
     
     def add_log(self, log_entry: Dict):
         with self._lock:
@@ -172,10 +175,19 @@ class ThreadSafeCache:
         with self._lock:
             return list(self._logs)
 
-    # --- الإصلاح: إضافة دالة __len__ ---
+    # --- الدوال السحرية المضافة ---
     def __len__(self) -> int:
         with self._lock:
             return len(self._data)
+
+    def __contains__(self, key: str) -> bool:
+        with self._lock:
+            return key in self._data
+
+    def __iter__(self):
+        with self._lock:
+            # نرجع نسخة من المفاتيح لتجنب مشاكل التعديل أثناء الدوران
+            return iter(list(self._data.keys()))
 
 
 signals_cache = ThreadSafeCache()
@@ -208,12 +220,10 @@ class DatabaseManager:
                 finally:
                     cursor.close()
             else:
-                # في حالة فشل الاتصال، نقوم بتمرير yield وهمي لتجنب الانهيار الكامل
                 logger.error("Database connection lost, skipping DB operation.")
                 yield None
     
     def init_tables(self):
-        # التأكد من صحة المؤشر قبل التنفيذ
         try:
             with self.get_cursor() as cur:
                 if cur:
@@ -381,7 +391,7 @@ class TechnicalAnalyzer:
         df['tr'] = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
         df['atr'] = df['tr'].rolling(14).mean()
         
-        # ADX Simplified Logic
+        # ADX Simplified
         up = df['high'].diff()
         down = -df['low'].diff()
         plus_dm = np.where((up > down) & (up > 0), up, 0.0)
@@ -551,10 +561,8 @@ class TradingEngine:
                 regime = MarketRegimeAnalyzer.analyze(self._client)
                 paper = BOT_SETTINGS.get('paper_trading_mode')
                 
-                # 1. إدارة المفتوح (تم الإصلاح: استخدام items() لنسخ القائمة)
-                # استخدام نسخة لتجنب RuntimeError عند الحذف
+                # 1. إدارة المفتوح
                 active_trades_list = signals_cache.items()
-                
                 for sym, trade in active_trades_list:
                     df = analyzer.fetch_data(self._client, sym, '5m', 50)
                     if df is None: continue
@@ -562,7 +570,7 @@ class TradingEngine:
                     curr = df.iloc[-1]['close']
                     prices_cache.set(sym, curr)
                     
-                    # فحص وقف الخسارة
+                    # وقف الخسارة
                     if curr <= trade['stop_loss']:
                         trade_obj = signals_cache.delete(sym)
                         if trade_obj:
@@ -586,10 +594,11 @@ class TradingEngine:
                             db.close_trade(trade_obj['id'], val, profit, 0, note)
                             notifier.notify_sell({'symbol': sym, 'price': val, 'profit': profit, 'reason': note})
 
-                # 2. بحث جديد (تم إصلاح الخطأ: الآن len() تعمل)
+                # 2. بحث جديد
                 if len(signals_cache) < BOT_SETTINGS.get('max_open_trades'):
                     random.shuffle(self._symbols)
                     for sym in self._symbols[:15]:
+                        # هنا تم الإصلاح: الآن 'in' تعمل بشكل صحيح
                         if sym in signals_cache: continue
                         
                         df = analyzer.fetch_data(self._client, sym, BOT_SETTINGS.get('timeframe_analysis'))
@@ -641,7 +650,7 @@ def analytics():
     return jsonify({
         "market": system_state.to_dict(),
         "signals": [v for k,v in signals_cache.items()],
-        "prices": {k:prices_cache.get(k) for k,v in signals_cache.items()}, # تحسين جلب الأسعار
+        "prices": {k:prices_cache.get(k) for k,v in signals_cache.items()},
         "stats": db.get_trade_statistics(),
         "logs": signals_cache.get_logs(),
         "settings": BOT_SETTINGS.to_dict()
@@ -674,7 +683,7 @@ DASHBOARD_HTML = """
 </head>
 <body>
     <div class="header">
-        <h1>SmartBot <span style="color:var(--accent)">V15.1</span> <small style="font-size:14px; color:#666">Stable</small></h1>
+        <h1>SmartBot <span style="color:var(--accent)">V15.2</span> <small style="font-size:14px; color:#666">Stable</small></h1>
         <button id="pwrBtn" class="btn" onclick="toggle()">تحميل...</button>
     </div>
     
