@@ -3,171 +3,373 @@ import os
 
 app = Flask(__name__)
 
-# كود HTML الخاص بك تم وضعه هنا كقالب
+# كود HTML المحسن والمدمج
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مصاريف البيت - متتبع الميزانية الذكي</title>
+    <title>تقسيم الميزانية الجزائرية - Pro</title>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
     <style>
         :root {
             --bg: #0f1419;
             --panel: #192734;
-            --panel-hover: #22303c;
             --border: #38444d;
             --text: #ffffff;
-            --text-muted: #8899a6;
+            --text-secondary: #8899a6;
             --primary: #1da882;
-            --primary-glow: #0ecb81;
-            --secondary: #f0b90b;
             --danger: #f6465d;
-            --warning: #f7931a;
-            --accent: #1d9bf0;
-            --gradient-primary: linear-gradient(135deg, #1da882 0%, #0ecb81 100%);
-            --gradient-gold: linear-gradient(135deg, #f0b90b 0%, #fcd435 100%);
-            --gradient-danger: linear-gradient(135deg, #f6465d 0%, #ff6b7a 100%);
-            --shadow-glow: 0 0 30px rgba(29, 168, 130, 0.3);
+            --warning: #f0b90b;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: var(--bg); color: var(--text); font-family: 'Cairo', sans-serif; min-height: 100vh; line-height: 1.6; }
+        body { background: var(--bg); color: var(--text); font-family: 'Cairo', sans-serif; min-height: 100vh; padding-bottom: 50px; }
 
-        .header { background: var(--gradient-primary); padding: 30px 20px; border-radius: 0 0 30px 30px; box-shadow: var(--shadow-glow); margin-bottom: -20px; position: relative; z-index: 10; }
-        .header-content { max-width: 900px; margin: 0 auto; }
-        .header-title { display: flex; align-items: center; gap: 15px; margin-bottom: 25px; }
-        .logo-icon { width: 50px; height: 50px; background: rgba(255,255,255,0.2); border-radius: 15px; display: flex; align-items: center; justify-content: center; font-size: 24px; animation: float 3s ease-in-out infinite; }
-        @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
-        .header h1 { font-size: 28px; font-weight: 900; }
-        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-        .stat-card { background: rgba(255,255,255,0.15); backdrop-filter: blur(10px); border-radius: 16px; padding: 20px 15px; text-align: center; }
-        .stat-value { font-size: 22px; font-weight: 900; }
-        
-        .progress-bar { height: 12px; background: rgba(255,255,255,0.2); border-radius: 10px; overflow: hidden; margin-top: 10px; }
-        .progress-fill { height: 100%; transition: width 0.5s ease; }
-        .progress-safe { background: #fff; }
-        .progress-warning { background: var(--warning); }
-        .progress-danger { background: var(--danger); }
+        .header {
+            background: linear-gradient(135deg, #15202b 0%, #192734 100%);
+            padding: 30px 20px;
+            border-bottom: 1px solid var(--border);
+            text-align: center;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
 
-        .main-content { max-width: 900px; margin: 0 auto; padding: 40px 20px 30px; }
-        .btn { border: none; border-radius: 12px; padding: 12px 20px; font-family: 'Cairo', sans-serif; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 14px; }
-        .btn-primary { background: var(--gradient-primary); color: white; }
-        .card { background: var(--panel); border: 1px solid var(--border); border-radius: 20px; padding: 20px; margin-bottom: 15px; }
-        .hidden { display: none !important; }
+        .main-input-container {
+            max-width: 500px;
+            margin: 20px auto 0;
+            position: relative;
+        }
+
+        .budget-label {
+            display: block;
+            margin-bottom: 10px;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .main-input {
+            width: 100%;
+            background: #253341;
+            border: 2px solid var(--primary);
+            color: white;
+            padding: 15px;
+            font-size: 24px;
+            font-weight: bold;
+            text-align: center;
+            border-radius: 15px;
+            font-family: 'Cairo', sans-serif;
+            transition: all 0.3s ease;
+        }
+
+        .main-input:focus {
+            outline: none;
+            box-shadow: 0 0 15px rgba(29, 168, 130, 0.4);
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 30px auto;
+            padding: 0 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            background: var(--panel);
+            border-radius: 20px;
+            padding: 20px;
+            border: 1px solid var(--border);
+            position: relative;
+            overflow: hidden;
+            transition: transform 0.2s;
+        }
+
+        .card:hover { transform: translateY(-3px); }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+
+        .category-icon { font-size: 28px; background: rgba(255,255,255,0.1); padding: 10px; border-radius: 12px; }
         
-        /* Form & Selectors Styles */
-        .form-card { background: var(--panel); border: 1px solid var(--border); border-radius: 20px; padding: 25px; margin-bottom: 20px; }
-        .form-input { width: 100%; padding: 14px 16px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; color: var(--text); margin-bottom: 10px; }
-        .selector-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
-        .selector-item { width: 48px; height: 48px; border-radius: 12px; border: 2px solid var(--border); display: flex; align-items: center; justify-content: center; cursor: pointer; }
-        .selector-item.active { border-color: var(--primary); background: rgba(29, 168, 130, 0.15); }
-        .bg-primary { background: var(--gradient-primary); }
-        .bg-gold { background: var(--gradient-gold); }
-        .bg-blue { background: linear-gradient(135deg, #1d9bf0 0%, #60c5ff 100%); }
+        .category-info h3 { font-size: 18px; margin-bottom: 5px; }
+        .category-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.4; background: rgba(0,0,0,0.2); padding: 5px 8px; border-radius: 6px; display: inline-block;}
+
+        .money-stats {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .allocated { color: var(--primary); }
+        .spent-text { color: var(--danger); }
+
+        .progress-bar {
+            height: 10px;
+            background: #2c3640;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-bottom: 15px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--primary);
+            transition: width 0.5s ease, background 0.3s;
+        }
+
+        .expense-input-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .mini-input {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: white;
+            padding: 8px;
+            border-radius: 8px;
+            width: 100%;
+            font-family: 'Cairo';
+        }
+
+        .btn-add {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0 15px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        
+        .btn-reset {
+            background: transparent;
+            color: var(--danger);
+            border: 1px solid var(--danger);
+            padding: 5px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 600px) {
+            .header h1 { font-size: 20px; }
+            .container { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
-    <header class="header">
-        <div class="header-content">
-            <div class="header-title">
-                <div class="logo-icon">💰</div>
-                <div><h1>مصاريف البيت</h1><p>تتبع ميزانيتك بذكاء</p></div>
-            </div>
-            <div class="stats-grid">
-                <div class="stat-card"><div>الميزانية</div><div class="stat-value" id="totalBudget">0</div></div>
-                <div class="stat-card"><div>المصروف</div><div class="stat-value" id="totalSpent">0</div></div>
-                <div class="stat-card"><div>المتبقي</div><div class="stat-value" id="remaining">0</div></div>
-            </div>
-            <div class="progress-bar"><div class="progress-fill" id="overallProgress" style="width: 0%"></div></div>
-        </div>
-    </header>
 
-    <main class="main-content">
-        <div style="display:flex; justify-content:space-between; margin-bottom:20px;">
-            <h3>📊 فئات المصاريف</h3>
-            <button class="btn btn-primary" onclick="toggleAddCategory()">➕ فئة جديدة</button>
+    <div class="header">
+        <h1>📊 مقسم الميزانية الجزائري</h1>
+        <div class="main-input-container">
+            <label class="budget-label">أدخل الراتب / الميزانية الكلية (دج)</label>
+            <input type="number" id="totalBudgetInput" class="main-input" placeholder="مثلاً: 40000" oninput="updateBudget()">
         </div>
-
-        <div id="addCategoryForm" class="form-card hidden">
-            <input type="text" id="categoryName" class="form-input" placeholder="اسم الفئة">
-            <input type="number" id="categoryBudget" class="form-input" placeholder="الميزانية">
-            <div class="selector-grid" id="iconSelector">
-                <div class="selector-item active" data-icon="🏠" onclick="selectIcon(this)">🏠</div>
-                <div class="selector-item" data-icon="🛒" onclick="selectIcon(this)">🛒</div>
-                <div class="selector-item" data-icon="🚗" onclick="selectIcon(this)">🚗</div>
-            </div>
-            <button class="btn btn-primary" onclick="addCategory()">✅ إضافة</button>
+        <div style="margin-top: 15px; font-size: 14px; color: var(--text-secondary);">
+            المتبقي الصافي: <span id="totalRemaining" style="color: var(--primary); font-weight: bold; font-size: 18px;">0</span> دج
         </div>
+    </div>
 
-        <div id="categoriesContainer"></div>
-    </main>
+    <div class="container" id="cardsContainer">
+        <!-- Cards will be injected here by JS -->
+    </div>
+
+    <div style="text-align: center; margin-top: 20px;">
+        <button onclick="resetAllData()" style="background: #333; color: #888; border: none; padding: 10px 20px; border-radius: 20px; cursor: pointer;">⚠️ تصفير كل البيانات</button>
+    </div>
 
     <script>
-        let categories = JSON.parse(localStorage.getItem('expenseCategories')) || [];
-        let selectedIcon = '🏠';
+        // تكوين الفئات بالنسب المئوية (مجموعها 100%)
+        const CONFIG = [
+            { 
+                id: 'baby', 
+                name: 'احتياجات الرضيع', 
+                percent: 0.20, 
+                icon: '👶', 
+                desc: 'حفاضات + حليب (خط أحمر مقدس ⛔)' 
+            },
+            { 
+                id: 'groceries', 
+                name: 'قضيان الشهر', 
+                percent: 0.30, 
+                icon: '🛒', 
+                desc: 'أساسيات + تنظيف (تقليص الكميات بذكاء)' 
+            },
+            { 
+                id: 'market', 
+                name: 'الخضر والفواكه', 
+                percent: 0.20, 
+                icon: '🍎', 
+                desc: 'سوق أسبوعي (خيارات موسمية محدودة)' 
+            },
+            { 
+                id: 'meat', 
+                name: 'اللحوم والبيض', 
+                percent: 0.125, 
+                icon: '🍗', 
+                desc: 'دجاجة أسبوعياً + بلاطو بيض (وداعاً للحم الأحمر)' 
+            },
+            { 
+                id: 'daily', 
+                name: 'الخبز والحليب', 
+                percent: 0.10, 
+                icon: '🥖', 
+                desc: 'للوالدين والطفلة (5 سنوات)' 
+            },
+            { 
+                id: 'bills', 
+                name: 'فواتير وطوارئ', 
+                percent: 0.075, 
+                icon: '💡', 
+                desc: 'مبلغ رمزي للكهرباء/الماء/الإنترنت' 
+            }
+        ];
 
-        function render() {
-            const container = document.getElementById('categoriesContainer');
-            const totalBudget = categories.reduce((sum, c) => sum + c.budget, 0);
-            const totalSpent = categories.reduce((sum, c) => sum + (c.spent || 0), 0);
+        // State Management
+        let appState = {
+            totalBudget: 40000, // الافتراضي
+            expenses: {} // لتخزين المصاريف لكل فئة
+        };
+
+        // Load data on startup
+        function loadData() {
+            const savedData = localStorage.getItem('dzBudgetApp');
+            if (savedData) {
+                appState = JSON.parse(savedData);
+            }
+            // تعيين قيمة الإدخال
+            document.getElementById('totalBudgetInput').value = appState.totalBudget;
+            renderCards();
+        }
+
+        // Save data
+        function saveData() {
+            localStorage.setItem('dzBudgetApp', JSON.stringify(appState));
+            updateTotalStats();
+        }
+
+        // تحديث عند تغيير الميزانية
+        function updateBudget() {
+            const input = document.getElementById('totalBudgetInput');
+            let val = parseFloat(input.value);
+            if (isNaN(val) || val < 0) val = 0;
+            appState.totalBudget = val;
+            saveData();
+            renderCards();
+        }
+
+        // إضافة مصروف
+        function addExpense(catId) {
+            const input = document.getElementById(`input-${catId}`);
+            const amount = parseFloat(input.value);
             
-            document.getElementById('totalBudget').textContent = totalBudget;
-            document.getElementById('totalSpent').textContent = totalSpent;
-            document.getElementById('remaining').textContent = totalBudget - totalSpent;
-            document.getElementById('overallProgress').style.width = (totalBudget > 0 ? (totalSpent/totalBudget)*100 : 0) + '%';
-
-            container.innerHTML = categories.map(c => `
-                <div class="card">
-                    <div style="display:flex; justify-content:space-between">
-                        <strong>${c.icon} ${c.name}</strong>
-                        <span>${c.spent || 0} / ${c.budget} ريال</span>
-                    </div>
-                    <div class="progress-bar"><div class="progress-fill bg-primary" style="width:${(c.spent/c.budget)*100}%"></div></div>
-                    <div style="margin-top:10px; display:flex; gap:10px">
-                        <input type="number" id="exp-${c.id}" placeholder="المبلغ" style="width:80px">
-                        <button onclick="addExpense('${c.id}')">إضافة مصروف</button>
-                        <button onclick="deleteCategory('${c.id}')" style="color:red">حذف</button>
-                    </div>
-                </div>
-            `).join('');
-            localStorage.setItem('expenseCategories', JSON.stringify(categories));
-        }
-
-        function toggleAddCategory() { document.getElementById('addCategoryForm').classList.toggle('hidden'); }
-        
-        function addCategory() {
-            const name = document.getElementById('categoryName').value;
-            const budget = parseFloat(document.getElementById('categoryBudget').value);
-            if(name && budget) {
-                categories.push({ id: Date.now().toString(), name, budget, spent: 0, icon: selectedIcon });
-                render();
-                toggleAddCategory();
+            if (amount && amount > 0) {
+                if (!appState.expenses[catId]) appState.expenses[catId] = 0;
+                appState.expenses[catId] += amount;
+                input.value = '';
+                saveData();
+                renderCards();
             }
         }
 
-        function addExpense(id) {
-            const amt = parseFloat(document.getElementById('exp-'+id).value);
-            const cat = categories.find(c => c.id === id);
-            if(cat && amt) {
-                cat.spent = (cat.spent || 0) + amt;
-                render();
+        // تصفير مصروف فئة معينة
+        function resetCategory(catId) {
+            if(confirm('هل أنت متأكد من تصفير مصاريف هذا البند؟')) {
+                appState.expenses[catId] = 0;
+                saveData();
+                renderCards();
             }
         }
 
-        function deleteCategory(id) {
-            categories = categories.filter(c => c.id !== id);
-            render();
+        // الحسابات والعرض
+        function renderCards() {
+            const container = document.getElementById('cardsContainer');
+            container.innerHTML = '';
+            
+            let totalSpentGlobal = 0;
+
+            CONFIG.forEach(cat => {
+                // الحسابات
+                const allocated = Math.round(appState.totalBudget * cat.percent);
+                const spent = appState.expenses[cat.id] || 0;
+                const remaining = allocated - spent;
+                const progress = allocated > 0 ? (spent / allocated) * 100 : 0;
+                totalSpentGlobal += spent;
+
+                // تحديد لون الحالة
+                let statusColor = 'var(--primary)'; // أخضر
+                if (progress > 80) statusColor = 'var(--warning)'; // أصفر
+                if (progress >= 100) statusColor = 'var(--danger)'; // أحمر
+
+                // إنشاء البطاقة HTML
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.innerHTML = `
+                    <div class="card-header">
+                        <div class="category-icon">${cat.icon}</div>
+                        <div class="category-info">
+                            <h3>${cat.name}</h3>
+                            <div class="category-desc">${cat.desc}</div>
+                        </div>
+                        <div style="text-align:left">
+                            <small style="color:#8899a6">المخصص</small>
+                            <div style="font-weight:bold; font-size:18px">${allocated.toLocaleString()} دج</div>
+                        </div>
+                    </div>
+
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${Math.min(progress, 100)}%; background-color: ${statusColor}"></div>
+                    </div>
+
+                    <div class="money-stats">
+                        <span class="spent-text">صرفت: ${spent.toLocaleString()}</span>
+                        <span style="color: ${remaining < 0 ? 'var(--danger)' : 'var(--text)'}">
+                            الباقي: ${remaining.toLocaleString()}
+                        </span>
+                    </div>
+
+                    <div class="expense-input-group">
+                        <input type="number" id="input-${cat.id}" class="mini-input" placeholder="أضف مصروف...">
+                        <button onclick="addExpense('${cat.id}')" class="btn-add">+</button>
+                    </div>
+                    <div style="text-align:left">
+                         <button onclick="resetCategory('${cat.id}')" class="btn-reset">تصفير</button>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+
+            // تحديث الإجمالي الكلي في الهيدر
+            const totalRemaining = appState.totalBudget - totalSpentGlobal;
+            const remEl = document.getElementById('totalRemaining');
+            remEl.innerText = totalRemaining.toLocaleString();
+            remEl.style.color = totalRemaining < 0 ? 'var(--danger)' : 'var(--primary)';
         }
 
-        function selectIcon(el) {
-            document.querySelectorAll('.selector-item').forEach(i => i.classList.remove('active'));
-            el.classList.add('active');
-            selectedIcon = el.dataset.icon;
+        function resetAllData() {
+            if(confirm('هل تريد حقاً مسح جميع البيانات والعودة للصفر؟')) {
+                localStorage.removeItem('dzBudgetApp');
+                appState = { totalBudget: 40000, expenses: {} };
+                loadData();
+            }
         }
 
-        render();
+        // Init
+        loadData();
     </script>
 </body>
 </html>
@@ -178,6 +380,5 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 if __name__ == '__main__':
-    # Render يتطلب الاستماع على منفذ ديناميكي
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
