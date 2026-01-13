@@ -3,15 +3,16 @@ import os
 
 app = Flask(__name__)
 
-# كود HTML المحسن والمدمج
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>تقسيم الميزانية الجزائرية - Pro</title>
+    <title>لوحة التحكم المالية - Pro</title>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
+    <!-- استدعاء مكتبة الرسوم البيانية -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
             --bg: #0f1419;
@@ -29,346 +30,277 @@ HTML_TEMPLATE = """
 
         .header {
             background: linear-gradient(135deg, #15202b 0%, #192734 100%);
-            padding: 30px 20px;
+            padding: 20px;
             border-bottom: 1px solid var(--border);
             text-align: center;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-        }
-
-        .main-input-container {
-            max-width: 500px;
-            margin: 20px auto 0;
-            position: relative;
-        }
-
-        .budget-label {
-            display: block;
-            margin-bottom: 10px;
-            color: var(--text-secondary);
-            font-size: 0.9rem;
         }
 
         .main-input {
-            width: 100%;
-            background: #253341;
-            border: 2px solid var(--primary);
-            color: white;
-            padding: 15px;
-            font-size: 24px;
-            font-weight: bold;
-            text-align: center;
-            border-radius: 15px;
-            font-family: 'Cairo', sans-serif;
-            transition: all 0.3s ease;
+            width: 100%; max-width: 400px;
+            background: #253341; border: 2px solid var(--primary);
+            color: white; padding: 10px; font-size: 20px;
+            font-weight: bold; text-align: center; border-radius: 10px;
+            font-family: 'Cairo'; margin-top: 10px;
         }
 
-        .main-input:focus {
-            outline: none;
-            box-shadow: 0 0 15px rgba(29, 168, 130, 0.4);
-        }
-
-        .container {
-            max-width: 800px;
-            margin: 30px auto;
-            padding: 0 20px;
+        /* تخطيط الصفحة: قسمين (الرسوم البيانية + البطاقات) */
+        .dashboard-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            grid-template-columns: 1fr 350px; /* البطاقات تأخذ مساحة والعرض الجانبي للرسوم */
             gap: 20px;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+
+        @media (max-width: 900px) {
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .charts-panel { order: -1; } /* الرسوم تظهر أولاً في الموبايل */
         }
 
         .card {
-            background: var(--panel);
-            border-radius: 20px;
-            padding: 20px;
-            border: 1px solid var(--border);
-            position: relative;
-            overflow: hidden;
-            transition: transform 0.2s;
+            background: var(--panel); border-radius: 15px;
+            padding: 15px; border: 1px solid var(--border);
+            margin-bottom: 15px; position: relative;
         }
 
-        .card:hover { transform: translateY(-3px); }
-
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 15px;
+        .charts-panel {
+            background: var(--panel); border-radius: 15px;
+            padding: 20px; border: 1px solid var(--border);
+            height: fit-content;
+            position: sticky; top: 20px;
         }
 
-        .category-icon { font-size: 28px; background: rgba(255,255,255,0.1); padding: 10px; border-radius: 12px; }
+        .report-box {
+            background: rgba(29, 168, 130, 0.1);
+            border: 1px solid var(--primary);
+            padding: 15px; border-radius: 10px;
+            margin-top: 20px; font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .report-danger { background: rgba(246, 70, 93, 0.1); border-color: var(--danger); }
+        .report-warning { background: rgba(240, 185, 11, 0.1); border-color: var(--warning); }
+
+        .progress-bar { height: 8px; background: #2c3640; border-radius: 4px; overflow: hidden; margin: 10px 0; }
+        .progress-fill { height: 100%; transition: width 0.5s ease; }
         
-        .category-info h3 { font-size: 18px; margin-bottom: 5px; }
-        .category-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.4; background: rgba(0,0,0,0.2); padding: 5px 8px; border-radius: 6px; display: inline-block;}
-
-        .money-stats {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 10px;
-            font-weight: bold;
-            font-size: 14px;
-        }
-
-        .allocated { color: var(--primary); }
-        .spent-text { color: var(--danger); }
-
-        .progress-bar {
-            height: 10px;
-            background: #2c3640;
-            border-radius: 5px;
-            overflow: hidden;
-            margin-bottom: 15px;
-        }
-
-        .progress-fill {
-            height: 100%;
-            background: var(--primary);
-            transition: width 0.5s ease, background 0.3s;
-        }
-
-        .expense-input-group {
-            display: flex;
-            gap: 10px;
-            margin-top: 15px;
-            padding-top: 15px;
-            border-top: 1px solid rgba(255,255,255,0.1);
-        }
-
-        .mini-input {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            color: white;
-            padding: 8px;
-            border-radius: 8px;
-            width: 100%;
-            font-family: 'Cairo';
-        }
-
-        .btn-add {
-            background: var(--primary);
-            color: white;
-            border: none;
-            padding: 0 15px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: bold;
+        .btn-action {
+            background: var(--primary); color: white; border: none;
+            padding: 5px 12px; border-radius: 6px; cursor: pointer;
+            font-family: 'Cairo'; margin-left: 5px;
         }
         
-        .btn-reset {
-            background: transparent;
-            color: var(--danger);
-            border: 1px solid var(--danger);
-            padding: 5px 10px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 12px;
-            margin-top: 5px;
-        }
-
-        /* Responsive adjustments */
-        @media (max-width: 600px) {
-            .header h1 { font-size: 20px; }
-            .container { grid-template-columns: 1fr; }
+        input[type="number"] {
+            background: var(--bg); border: 1px solid var(--border);
+            color: white; padding: 5px; border-radius: 6px; width: 80px;
         }
     </style>
 </head>
 <body>
 
     <div class="header">
-        <h1>📊 مقسم الميزانية الجزائري</h1>
-        <div class="main-input-container">
-            <label class="budget-label">أدخل الراتب / الميزانية الكلية (دج)</label>
-            <input type="number" id="totalBudgetInput" class="main-input" placeholder="مثلاً: 40000" oninput="updateBudget()">
-        </div>
-        <div style="margin-top: 15px; font-size: 14px; color: var(--text-secondary);">
-            المتبقي الصافي: <span id="totalRemaining" style="color: var(--primary); font-weight: bold; font-size: 18px;">0</span> دج
-        </div>
+        <h1>📊 لوحة القيادة المالية</h1>
+        <label style="color:var(--text-secondary)">الميزانية الكلية (دج)</label><br>
+        <input type="number" id="totalBudgetInput" class="main-input" placeholder="40000" oninput="updateBudget()">
     </div>
 
-    <div class="container" id="cardsContainer">
-        <!-- Cards will be injected here by JS -->
-    </div>
+    <div class="dashboard-grid">
+        
+        <!-- القسم الأيمن: بطاقات المصاريف -->
+        <div id="cardsContainer">
+            <!-- سيتم توليد البطاقات هنا -->
+        </div>
 
-    <div style="text-align: center; margin-top: 20px;">
-        <button onclick="resetAllData()" style="background: #333; color: #888; border: none; padding: 10px 20px; border-radius: 20px; cursor: pointer;">⚠️ تصفير كل البيانات</button>
+        <!-- القسم الأيسر: الرسوم البيانية والتقرير -->
+        <div class="charts-panel">
+            <h3 style="margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">📈 التحليل البياني</h3>
+            
+            <canvas id="budgetChart" width="300" height="300"></canvas>
+            
+            <div id="smartReport" class="report-box">
+                جاري تحليل البيانات...
+            </div>
+
+            <div style="margin-top: 20px; text-align: center;">
+                <h2 id="totalRemainingDisplay" style="color: var(--primary)">0 دج</h2>
+                <small style="color: var(--text-secondary)">المتبقي الصافي</small>
+            </div>
+            
+            <div style="margin-top:20px; text-align:center">
+                 <button onclick="resetAllData()" style="background:transparent; color:var(--text-secondary); border:1px solid var(--border); padding:5px 15px; border-radius:15px; cursor:pointer">🗑️ تصفير</button>
+            </div>
+        </div>
+
     </div>
 
     <script>
-        // تكوين الفئات بالنسب المئوية (مجموعها 100%)
+        // التكوين الأساسي
         const CONFIG = [
-            { 
-                id: 'baby', 
-                name: 'احتياجات الرضيع', 
-                percent: 0.20, 
-                icon: '👶', 
-                desc: 'حفاضات + حليب (خط أحمر مقدس ⛔)' 
-            },
-            { 
-                id: 'groceries', 
-                name: 'قضيان الشهر', 
-                percent: 0.30, 
-                icon: '🛒', 
-                desc: 'أساسيات + تنظيف (تقليص الكميات بذكاء)' 
-            },
-            { 
-                id: 'market', 
-                name: 'الخضر والفواكه', 
-                percent: 0.20, 
-                icon: '🍎', 
-                desc: 'سوق أسبوعي (خيارات موسمية محدودة)' 
-            },
-            { 
-                id: 'meat', 
-                name: 'اللحوم والبيض', 
-                percent: 0.125, 
-                icon: '🍗', 
-                desc: 'دجاجة أسبوعياً + بلاطو بيض (وداعاً للحم الأحمر)' 
-            },
-            { 
-                id: 'daily', 
-                name: 'الخبز والحليب', 
-                percent: 0.10, 
-                icon: '🥖', 
-                desc: 'للوالدين والطفلة (5 سنوات)' 
-            },
-            { 
-                id: 'bills', 
-                name: 'فواتير وطوارئ', 
-                percent: 0.075, 
-                icon: '💡', 
-                desc: 'مبلغ رمزي للكهرباء/الماء/الإنترنت' 
-            }
+            { id: 'baby', name: 'الرضيع', percent: 0.20, color: '#FF6384' },
+            { id: 'groceries', name: 'قضيان', percent: 0.30, color: '#36A2EB' },
+            { id: 'market', name: 'خضر/فواكه', percent: 0.20, color: '#FFCE56' },
+            { id: 'meat', name: 'لحوم', percent: 0.125, color: '#4BC0C0' },
+            { id: 'daily', name: 'خبز/حليب', percent: 0.10, color: '#9966FF' },
+            { id: 'bills', name: 'فواتير', percent: 0.075, color: '#FF9F40' }
         ];
 
-        // State Management
-        let appState = {
-            totalBudget: 40000, // الافتراضي
-            expenses: {} // لتخزين المصاريف لكل فئة
-        };
+        let appState = { totalBudget: 40000, expenses: {} };
+        let myChart = null; // متغير لتخزين كائن الرسم البياني
 
-        // Load data on startup
         function loadData() {
-            const savedData = localStorage.getItem('dzBudgetApp');
-            if (savedData) {
-                appState = JSON.parse(savedData);
-            }
-            // تعيين قيمة الإدخال
+            const saved = localStorage.getItem('dzBudgetPro_v2');
+            if (saved) appState = JSON.parse(saved);
             document.getElementById('totalBudgetInput').value = appState.totalBudget;
-            renderCards();
+            renderAll();
         }
 
-        // Save data
         function saveData() {
-            localStorage.setItem('dzBudgetApp', JSON.stringify(appState));
-            updateTotalStats();
+            localStorage.setItem('dzBudgetPro_v2', JSON.stringify(appState));
+            renderAll();
         }
 
-        // تحديث عند تغيير الميزانية
         function updateBudget() {
-            const input = document.getElementById('totalBudgetInput');
-            let val = parseFloat(input.value);
-            if (isNaN(val) || val < 0) val = 0;
-            appState.totalBudget = val;
+            let val = parseFloat(document.getElementById('totalBudgetInput').value);
+            appState.totalBudget = (val >= 0) ? val : 0;
             saveData();
-            renderCards();
         }
 
-        // إضافة مصروف
-        function addExpense(catId) {
-            const input = document.getElementById(`input-${catId}`);
-            const amount = parseFloat(input.value);
-            
-            if (amount && amount > 0) {
-                if (!appState.expenses[catId]) appState.expenses[catId] = 0;
-                appState.expenses[catId] += amount;
+        function addExpense(id) {
+            const input = document.getElementById(`in-${id}`);
+            const val = parseFloat(input.value);
+            if (val > 0) {
+                appState.expenses[id] = (appState.expenses[id] || 0) + val;
                 input.value = '';
                 saveData();
-                renderCards();
             }
         }
 
-        // تصفير مصروف فئة معينة
-        function resetCategory(catId) {
-            if(confirm('هل أنت متأكد من تصفير مصاريف هذا البند؟')) {
-                appState.expenses[catId] = 0;
-                saveData();
-                renderCards();
-            }
+        function renderAll() {
+            renderCards();
+            updateChart();
+            generateReport();
         }
 
-        // الحسابات والعرض
+        // 1. توليد البطاقات
         function renderCards() {
             const container = document.getElementById('cardsContainer');
             container.innerHTML = '';
-            
-            let totalSpentGlobal = 0;
 
             CONFIG.forEach(cat => {
-                // الحسابات
                 const allocated = Math.round(appState.totalBudget * cat.percent);
                 const spent = appState.expenses[cat.id] || 0;
                 const remaining = allocated - spent;
                 const progress = allocated > 0 ? (spent / allocated) * 100 : 0;
-                totalSpentGlobal += spent;
+                
+                let barColor = 'var(--primary)';
+                if(progress > 80) barColor = 'var(--warning)';
+                if(progress > 100) barColor = 'var(--danger)';
 
-                // تحديد لون الحالة
-                let statusColor = 'var(--primary)'; // أخضر
-                if (progress > 80) statusColor = 'var(--warning)'; // أصفر
-                if (progress >= 100) statusColor = 'var(--danger)'; // أحمر
-
-                // إنشاء البطاقة HTML
-                const card = document.createElement('div');
-                card.className = 'card';
-                card.innerHTML = `
-                    <div class="card-header">
-                        <div class="category-icon">${cat.icon}</div>
-                        <div class="category-info">
-                            <h3>${cat.name}</h3>
-                            <div class="category-desc">${cat.desc}</div>
+                container.innerHTML += `
+                    <div class="card">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
+                            <strong>${cat.name}</strong>
+                            <span style="color:${remaining < 0 ? 'var(--danger)' : 'var(--text)'}">
+                                ${spent.toLocaleString()} / <small>${allocated.toLocaleString()}</small>
+                            </span>
                         </div>
-                        <div style="text-align:left">
-                            <small style="color:#8899a6">المخصص</small>
-                            <div style="font-weight:bold; font-size:18px">${allocated.toLocaleString()} دج</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width:${Math.min(progress, 100)}%; background:${barColor}"></div>
                         </div>
-                    </div>
-
-                    <div class="progress-bar">
-                        <div class="progress-fill" style="width: ${Math.min(progress, 100)}%; background-color: ${statusColor}"></div>
-                    </div>
-
-                    <div class="money-stats">
-                        <span class="spent-text">صرفت: ${spent.toLocaleString()}</span>
-                        <span style="color: ${remaining < 0 ? 'var(--danger)' : 'var(--text)'}">
-                            الباقي: ${remaining.toLocaleString()}
-                        </span>
-                    </div>
-
-                    <div class="expense-input-group">
-                        <input type="number" id="input-${cat.id}" class="mini-input" placeholder="أضف مصروف...">
-                        <button onclick="addExpense('${cat.id}')" class="btn-add">+</button>
-                    </div>
-                    <div style="text-align:left">
-                         <button onclick="resetCategory('${cat.id}')" class="btn-reset">تصفير</button>
+                        <div style="display:flex; gap:10px; margin-top:5px;">
+                            <input type="number" id="in-${cat.id}" placeholder="المبلغ">
+                            <button class="btn-action" onclick="addExpense('${cat.id}')">+</button>
+                        </div>
                     </div>
                 `;
-                container.appendChild(card);
+            });
+        }
+
+        // 2. تحديث الرسم البياني (Doughnut Chart)
+        function updateChart() {
+            const ctx = document.getElementById('budgetChart').getContext('2d');
+            
+            // تحضير البيانات
+            const labels = CONFIG.map(c => c.name);
+            const spentData = CONFIG.map(c => appState.expenses[c.id] || 0);
+            const bgColors = CONFIG.map(c => c.color);
+
+            if (myChart) {
+                myChart.data.datasets[0].data = spentData;
+                myChart.update();
+            } else {
+                myChart = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            data: spentData,
+                            backgroundColor: bgColors,
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { position: 'bottom', labels: { color: '#fff' } },
+                            title: { display: true, text: 'توزيع المصاريف الفعلي', color: '#fff' }
+                        }
+                    }
+                });
+            }
+        }
+
+        // 3. توليد التقرير الذكي
+        function generateReport() {
+            const totalSpent = Object.values(appState.expenses).reduce((a, b) => a + b, 0);
+            const remaining = appState.totalBudget - totalSpent;
+            const burnRate = (totalSpent / appState.totalBudget) * 100;
+            
+            const reportEl = document.getElementById('smartReport');
+            const remDisplay = document.getElementById('totalRemainingDisplay');
+
+            remDisplay.innerText = remaining.toLocaleString() + ' دج';
+            remDisplay.style.color = remaining < 0 ? 'var(--danger)' : 'var(--primary)';
+
+            let statusHTML = '';
+            let alertClass = '';
+
+            if (remaining < 0) {
+                statusHTML = `<strong>🚨 حالة طوارئ!</strong> لقد تجاوزت الميزانية بـ ${Math.abs(remaining)} دج. يجب التوقف فوراً عن الشراء.`;
+                alertClass = 'report-danger';
+            } else if (burnRate > 80) {
+                statusHTML = `<strong>⚠️ تحذير:</strong> لقد استهلكت ${burnRate.toFixed(1)}% من الميزانية. تبقى لك مبلغ ضئيل جداً.`;
+                alertClass = 'report-warning';
+            } else {
+                statusHTML = `<strong>✅ الوضع مستقر:</strong> استهلكت ${burnRate.toFixed(1)}% فقط. واصل على هذا المنوال.`;
+                alertClass = '';
+            }
+
+            // تحليل أعلى فئة استهلاكاً
+            let maxCat = CONFIG[0];
+            let maxVal = 0;
+            CONFIG.forEach(c => {
+                let s = appState.expenses[c.id] || 0;
+                if(s > maxVal) { maxVal = s; maxCat = c; }
             });
 
-            // تحديث الإجمالي الكلي في الهيدر
-            const totalRemaining = appState.totalBudget - totalSpentGlobal;
-            const remEl = document.getElementById('totalRemaining');
-            remEl.innerText = totalRemaining.toLocaleString();
-            remEl.style.color = totalRemaining < 0 ? 'var(--danger)' : 'var(--primary)';
+            if(maxVal > 0) {
+                statusHTML += `<br><br>👉 أكثر ما يستهلك مالك هو: <strong>${maxCat.name}</strong> (${maxVal} دج).`;
+            }
+
+            reportEl.innerHTML = statusHTML;
+            reportEl.className = 'report-box ' + alertClass;
         }
 
         function resetAllData() {
-            if(confirm('هل تريد حقاً مسح جميع البيانات والعودة للصفر؟')) {
-                localStorage.removeItem('dzBudgetApp');
+            if(confirm('هل أنت متأكد؟')) {
+                localStorage.removeItem('dzBudgetPro_v2');
                 appState = { totalBudget: 40000, expenses: {} };
                 loadData();
             }
         }
 
-        // Init
         loadData();
     </script>
 </body>
